@@ -1,0 +1,6 @@
+{
+  "name": "FinBot UX – Asistente Financiero WhatsApp",
+  "description": "Sistema de diseño UX/UI y simulador interactivo de WhatsApp para FinBot: control de gastos en 2 segundos, saldo real gastable, bóveda anti-impulso y recálculo flexible sin culpa para jóvenes en LatAm.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
