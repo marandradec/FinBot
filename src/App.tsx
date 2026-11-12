@@ -14,12 +14,8 @@ import {
 } from 'lucide-react';
 
 // ============================================================================
-// CONSTANTES CONFIGURABLES
+// TIPOS Y MODELO DE DATOS CANÓNICO
 // ============================================================================
-const SALDO_DIARIO_BASE = 0;   // La app arranca en cero
-const DIAS_SEMANA = 7;
-const PRESUPUESTO_OCIO_SEMANAL = 15;
-
 type ExpenseCategory = 'Alimentación' | 'Ocio' | 'Transporte' | 'Otros';
 
 interface Expense {
@@ -28,6 +24,7 @@ interface Expense {
   category: ExpenseCategory;
   description: string;
   time: string;
+  dayNumber: number; // 1 a 7
 }
 
 interface Income {
@@ -37,16 +34,24 @@ interface Income {
   source: string;
   fixedPayments: number;
   bovedaAmount: number;
-  dailyAdded: number;
+  dayAdded: number; // Día en que se registró
   time: string;
 }
 
 interface BovedaConfig {
   configured: boolean;
+  active: boolean;
   targetAmount: number;
   reason: string;
   deadline: string;
   percentage: number;
+}
+
+interface PausedPurchase {
+  id: string;
+  item: string;
+  amount: number;
+  time: string;
 }
 
 interface Message {
@@ -56,7 +61,7 @@ interface Message {
   time: string;
   quickReplies?: {
     id: string;
-    label: string; // UN solo emoji al inicio del texto
+    label: string;
     action: string;
     payload?: any;
   }[];
@@ -64,114 +69,108 @@ interface Message {
   isAmberAlert?: boolean;
 }
 
-// Estados finitos para el flujo conversacional
 type FlowState = 
   | 'WELCOME'
   | 'MENU'
   | 'AWAITING_INCOME_AMOUNT'
   | 'AWAITING_INCOME_TIMEFRAME'
-  | 'AWAITING_INCOME_SOURCE'
-  | 'AWAITING_INCOME_CUSTOM_SOURCE'
-  | 'AWAITING_INCOME_FIXED_ASK'
   | 'AWAITING_INCOME_FIXED_AMOUNT'
-  | 'BOVEDA_ASK_DECISION'
-  | 'BOVEDA_ASK_AMOUNT'
-  | 'BOVEDA_CUSTOM_AMOUNT'
+  | 'BOVEDA_OFFER_DECISION'
   | 'BOVEDA_ASK_REASON'
-  | 'BOVEDA_CUSTOM_REASON'
+  | 'BOVEDA_ASK_AMOUNT'
   | 'BOVEDA_ASK_DEADLINE'
-  | 'BOVEDA_CUSTOM_DEADLINE'
   | 'BOVEDA_ASK_PERCENTAGE'
-  | 'BOVEDA_CUSTOM_PERCENTAGE'
-  | 'AWAITING_AMOUNT'
-  | 'AWAITING_CATEGORY'
-  | 'AWAITING_PURCHASE_AMOUNT'
-  | 'CONFIRMING_CLOSE_DAY';
+  | 'AWAITING_EXPENSE_INPUT'
+  | 'AWAITING_PURCHASE_QUERY'
+  | 'AWAITING_PAUSED_DECISION';
 
-// Diccionario semántico de palabras clave para categorización
-const CATEGORY_KEYWORDS: Record<ExpenseCategory, string[]> = {
+// Diccionario semántico estricto con límites de palabra para evitar falsos positivos
+const CATEGORY_MATCHERS: Record<ExpenseCategory, RegExp[]> = {
   Alimentación: [
-    'empanada', 'empanadas', 'almuerzo', 'comida', 'cena', 'desayuno', 'café', 'cafe', 
-    'cafecito', 'pizza', 'hamburguesa', 'sushi', 'tacos', 'pan', 'panaderia', 'panadería', 
-    'super', 'supermercado', 'mercado', 'merienda', 'snack', 'restaurante', 'starbucks', 
-    'sandwich', 'helado', 'postre', 'delivery', 'rappi', 'pedidosya', 'chuchería', 'galletas',
-    'gaseosa', 'refresco', 'jugo', 'agua'
+    /\b(empanada|empanadas|almuerzo|comida|cena|desayuno|café|cafe|cafecito|pizza|hamburguesa|sushi|tacos)\b/i,
+    /\b(pan|panadería|panaderia|supermercado|super|mercado|merienda|snack|restaurante|starbucks)\b/i,
+    /\b(sandwich|sándwich|helado|postre|delivery|rappi|pedidosya|chuchería|galletas|gaseosa|refresco|jugo)\b/i,
+    /\b(botella de agua|agua mineral|tomar agua)\b/i
   ],
   Ocio: [
-    'cine', 'pelicula', 'película', 'salida', 'fiesta', 'boliche', 'bar', 'chela', 
-    'chelas', 'cerveza', 'birra', 'trago', 'ropa', 'shopping', 'compras', 'juego', 
-    'videojuego', 'steam', 'playstation', 'netflix', 'spotify', 'concierto', 'evento', 
-    'entradas', 'zara', 'h&m', 'zapatillas', 'tenis', 'championes', 'disco', 'discoteca'
+    /\b(cine|pelicula|película|salida|fiesta|boliche|bar|chela|chelas|cerveza|birra|trago)\b/i,
+    /\b(ropa|shopping|compras|juego|videojuego|steam|playstation|netflix|spotify|concierto|evento)\b/i,
+    /\b(entradas|zara|h&m|zapatillas|tenis|championes|disco|discoteca|pantalón|pantalon|pantalones)\b/i
   ],
   Transporte: [
-    'taxi', 'uber', 'didi', 'cabify', 'bus', 'colectivo', 'subte', 'metro', 'pasaje', 
-    'pasajes', 'gasolina', 'nafta', 'combustible', 'peaje', 'estacionamiento', 'micro', 
-    'transporte', 'recarga bip', 'parquímetro'
+    /\b(taxi|uber|didi|cabify|bus|colectivo|subte|metro|pasaje|pasajes)\b/i,
+    /\b(gasolina|nafta|combustible|peaje|estacionamiento|micro|transporte|recarga bip|parquímetro)\b/i
   ],
   Otros: [
-    'farmacia', 'medicina', 'remedio', 'pastillas', 'médico', 'dentista', 'fotocopias',
-    'impresiones', 'cuaderno', 'libro', 'arriendo', 'luz', 'agua', 'internet', 'celular',
-    'regalo', 'varios', 'compra'
+    /\b(farmacia|medicina|remedio|pastillas|médico|dentista|fotocopias|impresiones|cuaderno|libro)\b/i,
+    /\b(arriendo|alquiler|luz|internet|plan de celular|servicio de agua|recibo de agua|recibo|barbería|barberia|corte de pelo)\b/i
   ]
 };
 
-// Opciones predefinidas para simular Notas de Voz
+// Opciones para simular notas de voz
 const VOICE_SIMULATION_OPTIONS = [
   { id: 'v1', transcript: 'Gasté $10 en almuerzo', amount: 10, category: 'Alimentación' as const, desc: 'Almuerzo' },
-  { id: 'v2', transcript: 'pagué 5 de taxi', amount: 5, category: 'Transporte' as const, desc: 'Taxi' },
-  { id: 'v3', transcript: 'cine $8 con amigos', amount: 8, category: 'Ocio' as const, desc: 'Cine' },
-  { id: 'v4', transcript: 'café con galletas de $3', amount: 3, category: 'Alimentación' as const, desc: 'Café' },
-  { id: 'v5', transcript: 'farmacia $7 en medicina', amount: 7, category: 'Otros' as const, desc: 'Farmacia' },
+  { id: 'v2', transcript: 'Pagué 5 de taxi', amount: 5, category: 'Transporte' as const, desc: 'Taxi' },
+  { id: 'v3', transcript: 'Cine $8 con amigos', amount: 8, category: 'Ocio' as const, desc: 'Cine' },
+  { id: 'v4', transcript: 'Café de $3', amount: 3, category: 'Alimentación' as const, desc: 'Café' },
+  { id: 'v5', transcript: 'Farmacia $7 en medicina', amount: 7, category: 'Otros' as const, desc: 'Medicina' },
 ];
 
-// Opciones predefinidas para simular Fotos de Recibos
+// Opciones para simular fotos de recibos
 const PHOTO_SIMULATION_OPTIONS = [
-  { id: 'p1', merchant: 'Restaurante Menú', amount: 10, category: 'Alimentación' as const, desc: 'Menú del día' },
-  { id: 'p2', merchant: 'Cafetería Starbucks', amount: 4, category: 'Alimentación' as const, desc: 'Latte y snack' },
+  { id: 'p1', merchant: 'Menú Ejecutivo', amount: 10, category: 'Alimentación' as const, desc: 'Menú del día' },
+  { id: 'p2', merchant: 'Cafetería', amount: 4, category: 'Alimentación' as const, desc: 'Café y snack' },
   { id: 'p3', merchant: 'Farmacia San Pablo', amount: 7, category: 'Otros' as const, desc: 'Medicamentos' },
-  { id: 'p4', merchant: 'Supermercado Oxxo', amount: 15, category: 'Alimentación' as const, desc: 'Víveres' },
-  { id: 'p5', merchant: 'Cinépolis Entradas', amount: 8, category: 'Ocio' as const, desc: 'Entrada de cine' },
+  { id: 'p4', merchant: 'Supermercado', amount: 15, category: 'Alimentación' as const, desc: 'Víveres' },
+  { id: 'p5', merchant: 'Cinépolis', amount: 8, category: 'Ocio' as const, desc: 'Entrada de cine' },
 ];
 
-// Formato de hora actual HH:MM
+// Formato de hora HH:MM
 const getFormattedTime = (): string => {
   const now = new Date();
   return now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 };
 
-// Formato de dinero positivo amigable sin decimales innecesarios
+// Formato de dinero positivo limpio
 const formatMoney = (val: number): string => {
   if (isNaN(val)) return '0';
   const rounded = Math.round(val * 100) / 100;
   return rounded % 1 === 0 ? rounded.toString() : rounded.toFixed(2);
 };
 
-// Formato de saldo que soporta saldo negativo permitido con signo menos "−"
+// Formato de saldo con soporte de negativos
 const formatBalance = (val: number): string => {
   if (isNaN(val)) return '$0';
   const rounded = Math.round(val * 100) / 100;
   const absVal = Math.abs(rounded);
   const formattedAbs = absVal % 1 === 0 ? absVal.toString() : absVal.toFixed(2);
-  if (rounded < 0) {
-    return `−$${formattedAbs}`;
-  }
+  if (rounded < 0) return `−$${formattedAbs}`;
   return `$${formattedAbs}`;
 };
 
-// Parser robusto y tolerante de montos y categorías
+// Limpieza de descripción para evitar "Gasté $3 en empanadas: $3"
+const cleanExpenseDescription = (rawText: string, detectedCategory: ExpenseCategory): string => {
+  let clean = rawText
+    .replace(/(?:gasté|gaste|pagué|pague|compré|compre|en|de|por|\$|\d+(?:[.,]\d{1,2})?)/gi, '')
+    .trim();
+  clean = clean.replace(/^[,\s.-]+|[,\s.-]+$/g, '');
+  if (clean.length >= 2) {
+    return clean.charAt(0).toUpperCase() + clean.slice(1);
+  }
+  return detectedCategory;
+};
+
+// Parser robusto de montos y categorías
 const parseExpenseInput = (input: string) => {
   const clean = input.toLowerCase().trim();
 
-  // Buscar todos los números en el mensaje
+  // Buscar todos los números
   const matches = clean.match(/(?:\$?\s*(\d+(?:[.,]\d{1,2})?)\s*(?:usd|dólares|dolares|bucks)?)/g);
-  
   let amount: number | null = null;
   let hasMultipleAmounts = false;
 
   if (matches && matches.length > 0) {
-    if (matches.length > 1) {
-      hasMultipleAmounts = true;
-    }
+    if (matches.length > 1) hasMultipleAmounts = true;
     const rawNum = matches[0].replace(/[^\d.,]/g, '').replace(',', '.');
     const parsed = parseFloat(rawNum);
     if (!isNaN(parsed) && parsed > 0) {
@@ -179,11 +178,11 @@ const parseExpenseInput = (input: string) => {
     }
   }
 
-  // Detectar categoría por palabras clave
+  // Detectar categoría con límites de palabra
   let category: ExpenseCategory | null = null;
-  for (const [cat, words] of Object.entries(CATEGORY_KEYWORDS) as [ExpenseCategory, string[]][]) {
-    for (const word of words) {
-      if (clean.includes(word)) {
+  for (const [cat, regexList] of Object.entries(CATEGORY_MATCHERS) as [ExpenseCategory, RegExp[]][]) {
+    for (const regex of regexList) {
+      if (regex.test(clean)) {
         category = cat;
         break;
       }
@@ -195,7 +194,7 @@ const parseExpenseInput = (input: string) => {
 };
 
 export default function App() {
-  // Estado de pantalla
+  // Pantalla activa
   const [screen, setScreen] = useState<'welcome' | 'chat'>('welcome');
   const [flowState, setFlowState] = useState<FlowState>('WELCOME');
 
@@ -205,1554 +204,1076 @@ export default function App() {
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
   const [isPhotoModalOpen, setIsPhotoModalOpen] = useState(false);
 
-  // Estados financieros en memoria (inician en cero)
-  const [diaActual, setDiaActual] = useState(1);
+  // Estados del ciclo financiero
+  const [diaActual, setDiaActual] = useState(1); // 1 a 7
   const [semanaActual, setSemanaActual] = useState(1);
-  const [saldoRealGastable, setSaldoRealGastable] = useState(SALDO_DIARIO_BASE);
-  const [saldoSemanalAcumulado, setSaldoSemanalAcumulado] = useState(0); // Acumulador semanal para sobrantes
+  const [incomesList, setIncomesList] = useState<Income[]>([]);
+  const [expensesList, setExpensesList] = useState<Expense[]>([]);
   const [bovedaTotal, setBovedaTotal] = useState(0);
-  const [ahorroActual, setAhorroActual] = useState(0);
-  const [incomesWeekly, setIncomesWeekly] = useState<Income[]>([]);
-  const [expensesToday, setExpensesToday] = useState<Expense[]>([]);
-  const [expensesWeekly, setExpensesWeekly] = useState<Expense[]>([]);
-  const [hasAskedFixedPaymentsOnce, setHasAskedFixedPaymentsOnce] = useState(false);
+  const [extraBovedaSemanal, setExtraBovedaSemanal] = useState(0);
 
-  // Configuración de la Bóveda Anti-Impulso (Opcional, sin forzar al usuario)
+  // Configuración de Bóveda Anti-Impulso
   const [bovedaConfig, setBovedaConfig] = useState<BovedaConfig>({
     configured: false,
+    active: false,
     targetAmount: 0,
     reason: '',
     deadline: '',
     percentage: 0
   });
 
-  // Datos temporales mientras se configura la bóveda
-  const [pendingBovedaData, setPendingBovedaData] = useState<{
-    targetAmount?: number;
-    reason?: string;
-    deadline?: string;
-    percentage?: number;
-    sourceFlow?: 'income_first_time' | 'menu';
+  // Compras en pausa de 24 horas
+  const [pausedPurchases, setPausedPurchases] = useState<PausedPurchase[]>([]);
+
+  // Alerta de gasto al 80% (se dispara máximo 1 vez por día)
+  const [hasTriggered80Today, setHasTriggered80Today] = useState(false);
+
+  // Snapshots para deshacer
+  const [lastAction, setLastAction] = useState<{
+    type: 'expense' | 'income';
+    id: string;
   } | null>(null);
 
-  // Si la bóveda se activa durante el registro del primer ingreso, guardamos los datos del ingreso
-  const [pendingIncomeForBoveda, setPendingIncomeForBoveda] = useState<{
-    amount: number;
-    timeframe: 'today' | 'week';
-    source: string;
-    fixedPayments: number;
-  } | null>(null);
-
-  // Historial para deshacer último gasto o ingreso
-  const [lastExpenseSnapshot, setLastExpenseSnapshot] = useState<{
-    expense: Expense;
-    previousSaldo: number;
-  } | null>(null);
-
-  const [lastIncomeSnapshot, setLastIncomeSnapshot] = useState<{
-    income: Income;
-    previousSaldo: number;
-    previousBoveda: number;
-    previousSemanal: number;
-  } | null>(null);
-
-  // Estados temporales del flujo de ingresos
-  const [pendingIncomeData, setPendingIncomeData] = useState<{
+  // Estados temporales de flujos conversacionales
+  const [pendingIncome, setPendingIncome] = useState<{
     amount?: number;
     timeframe?: 'today' | 'week';
     source?: string;
     fixedPayments?: number;
-    isCorrectingAmount?: boolean;
   } | null>(null);
 
-  // Estados temporales de gastos
-  const [pendingExpenseData, setPendingExpenseData] = useState<{
-    amount?: number;
-    category?: ExpenseCategory;
-    desc?: string;
+  const [pendingBovedaSetup, setPendingBovedaSetup] = useState<{
+    reason?: string;
+    targetAmount?: number;
+    deadline?: string;
+    percentage?: number;
   } | null>(null);
 
-  // Estados de entrada del chat
+  // Chat
   const [inputText, setInputText] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
-
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Scroll automático hacia el último mensaje
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isTyping]);
 
-  // Lista estricta del Menú Principal
+  // ==========================================================================
+  // MOTOR MATEMÁTICO CANÓNICO (D1 RECOMENDADA)
+  // Saldo de hoy = (ingresos de la semana − bóveda − fijos − gastos de días anteriores) ÷ días que quedan − gastos de hoy
+  // ==========================================================================
+  // 1. Días que quedan en la semana actual (de hoy al día 7)
+  const diasQueQuedan = Math.max(1, 7 - diaActual + 1);
+
+  // 2. Gastos de días anteriores de esta semana
+  const gastosDiasAnteriores = expensesList
+    .filter((e) => e.dayNumber < diaActual)
+    .reduce((sum, e) => sum + e.amount, 0);
+
+  // 3. Gastos de hoy
+  const gastosHoy = expensesList
+    .filter((e) => e.dayNumber === diaActual)
+    .reduce((sum, e) => sum + e.amount, 0);
+
+  // 4. Ingresos de la semana (todos los ingresos entran al mismo fondo)
+  const ingresosDeLaSemana = incomesList.reduce((sum, i) => sum + i.amount, 0);
+
+  // 5. Bóveda apartada en la semana (porcentajes de ingresos + aportes directos)
+  const bovedaDeLaSemana = incomesList.reduce((sum, i) => sum + i.bovedaAmount, 0) + extraBovedaSemanal;
+
+  // 6. Pagos fijos de la semana
+  const fijosDeLaSemana = incomesList.reduce((sum, i) => sum + i.fixedPayments, 0);
+
+  // 7. Fondo disponible de la semana antes de los gastos de hoy
+  // Fondo = (ingresos de la semana − bóveda − fijos − gastos de días anteriores)
+  const fondoDisponibleSemana = ingresosDeLaSemana - bovedaDeLaSemana - fijosDeLaSemana - gastosDiasAnteriores;
+
+  // 8. Cuota calculada para hoy
+  const cuotaBaseHoy = Math.round((fondoDisponibleSemana / diasQueQuedan) * 100) / 100;
+
+  // 9. Saldo de hoy en tiempo real (Fórmula A exacta):
+  // Saldo de hoy = (ingresos de la semana − bóveda − fijos − gastos de días anteriores) ÷ días que quedan − gastos de hoy
+  const saldoDeHoy = Math.round((cuotaBaseHoy - gastosHoy) * 100) / 100;
+
+  // 10. Saldo de la semana restante (fondo total neto menos todos los gastos)
+  const totalGastosSemana = gastosDiasAnteriores + gastosHoy;
+  const saldoDeLaSemana = Math.round((ingresosDeLaSemana - bovedaDeLaSemana - fijosDeLaSemana - totalGastosSemana) * 100) / 100;
+  const disponibleHoyInicial = cuotaBaseHoy;
+
+  // ==========================================================================
+  // BOTONES DEL MENÚ PRINCIPAL (REGLA D7: UN SOLO EMOJI EN BOTONES DE ACCIÓN)
+  // ==========================================================================
   const MAIN_MENU_BUTTONS = [
     { id: 'btn_inc', label: '💵 Registrar ingreso', action: 'action_income_start' },
     { id: 'btn_reg', label: '➕ Registrar gasto', action: 'action_register' },
-    { id: 'btn_sal', label: '💰 Mi saldo de hoy', action: 'action_balance' },
-    { id: 'btn_buy', label: '🛍️ ¿Puedo comprar...?', action: 'action_can_i_buy' },
+    { id: 'btn_sal', label: '💰 Mi saldo', action: 'action_balance' },
+    { id: 'btn_buy', label: '🛍️ ¿Puedo comprar?', action: 'action_can_i_buy' },
     { id: 'btn_sum', label: '📊 Resumen semanal', action: 'action_summary' },
     { id: 'btn_end', label: '🌙 Finalizar día', action: 'action_end_day' },
-    { id: 'btn_bov', label: '🔒 Mi bóveda', action: 'action_boveda_start' }
+    { id: 'btn_bov', label: '🔒 Mi bóveda', action: 'action_boveda_menu' }
   ];
 
-  // ==========================================================================
-  // INICIAR CHAT Y MENÚ PRINCIPAL
-  // ==========================================================================
-  const handleStartChat = () => {
-    try {
-      setScreen('chat');
-      setFlowState('MENU');
-      if (messages.length === 0) {
-        setMessages([
-          {
-            id: 'msg_welcome_init',
-            sender: 'bot',
-            text: '¡Hola! 👋 Para calcular cuánto puedes gastar hoy, cuéntame cuánta plata recibiste.',
-            time: getFormattedTime(),
-            quickReplies: [
-              { id: 'w_inc', label: '💵 Registrar ingreso', action: 'action_income_start' },
-              { id: 'w_menu', label: '☰ Menú', action: 'action_menu' }
-            ]
-          }
-        ]);
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  // Enviar mensaje del bot con animación de "escribiendo..." (máx. 1 seg)
+  // Helper para enviar respuestas del bot
   const sendBotReply = (
     text: string, 
     quickReplies?: Message['quickReplies'], 
     options?: { isAmberAlert?: boolean; delayMs?: number }
   ) => {
-    try {
-      setIsTyping(true);
-      const delay = options?.delayMs !== undefined ? options.delayMs : 950;
-      setTimeout(() => {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: 'bot_' + Date.now(),
-            sender: 'bot',
-            text,
-            time: getFormattedTime(),
-            quickReplies,
-            isAmberAlert: options?.isAmberAlert
-          }
-        ]);
-        setIsTyping(false);
-      }, delay);
-    } catch (e) {
+    setIsTyping(true);
+    const delay = options?.delayMs !== undefined ? options.delayMs : 650;
+    setTimeout(() => {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: 'bot_' + Date.now(),
+          sender: 'bot',
+          text,
+          time: getFormattedTime(),
+          quickReplies,
+          isAmberAlert: options?.isAmberAlert
+        }
+      ]);
       setIsTyping(false);
-      console.error(e);
+    }, delay);
+  };
+
+  const showMainMenu = () => {
+    setFlowState('MENU');
+    setPendingIncome(null);
+    setPendingBovedaSetup(null);
+    setIsMenuOpen(false);
+    sendBotReply('¿En qué te ayudo ahora?', MAIN_MENU_BUTTONS);
+  };
+
+  const handleStartChat = () => {
+    setScreen('chat');
+    setFlowState('MENU');
+    if (messages.length === 0) {
+      setMessages([
+        {
+          id: 'msg_init',
+          sender: 'bot',
+          text: '¡Hola! Para calcular cuánto puedes gastar hoy, cuéntame cuánta plata recibiste.',
+          time: getFormattedTime(),
+          quickReplies: [
+            { id: 'w_inc', label: '💵 Registrar ingreso', action: 'action_income_start' },
+            { id: 'w_menu', label: '☰ Menú', action: 'action_menu' }
+          ]
+        }
+      ]);
     }
   };
 
-  // Mostrar menú principal en el chat
-  const showMainMenuInChat = () => {
-    setFlowState('MENU');
-    setPendingExpenseData(null);
-    setPendingIncomeData(null);
-    setPendingBovedaData(null);
-    setIsMenuOpen(false);
-    sendBotReply(
-      'Menú principal 🤖 ¿En qué te ayudo ahora?',
-      MAIN_MENU_BUTTONS
-    );
-  };
-
   // ==========================================================================
-  // FLUJO DE INGRESOS (CAMBIO 1: BOTONES EXACTOS)
+  // FLUJO DE INGRESOS (D2: ORDEN DIRECTO Y CONFIRMACIÓN INMEDIATA)
   // ==========================================================================
   const startIncomeFlow = () => {
     setFlowState('AWAITING_INCOME_AMOUNT');
-    setPendingIncomeData({ isCorrectingAmount: false });
+    setPendingIncome({});
     sendBotReply(
-      '¿Cuánto recibiste? 💵 Escríbelo normal, por ejemplo: "Me pagaron $120"',
+      '¿Cuánto recibiste? 💵 Escríbelo normal o toca una opción:',
       [
-        { id: 'inc_100', label: '💵 Me pagaron $100', action: 'action_income_sample_amount', payload: 100 },
-        { id: 'inc_50', label: '💵 Recibí $50', action: 'action_income_sample_amount', payload: 50 },
-        { id: 'inc_20', label: '💵 Recibí $20', action: 'action_income_sample_amount', payload: 20 },
-        { id: 'inc_otro', label: '✍️ Otro (escribir)', action: 'action_income_custom_amount_prompt' },
+        { id: 'inc_100', label: '$100', action: 'action_income_amount_chosen', payload: 100 },
+        { id: 'inc_50', label: '$50', action: 'action_income_amount_chosen', payload: 50 },
+        { id: 'inc_20', label: '$20', action: 'action_income_amount_chosen', payload: 20 },
+        { id: 'inc_otro', label: 'Otro monto', action: 'action_income_custom_amount' },
         { id: 'inc_back', label: '⬅️ Atrás', action: 'action_menu' }
       ]
     );
   };
 
-  // Paso 1 procesado -> Preguntar Paso 2 (tiempo)
-  const handleIncomeAmountEntered = (amount: number) => {
-    // Si estaba en corrección de monto, mantener opciones previas y recalcular
-    if (pendingIncomeData?.isCorrectingAmount && pendingIncomeData.timeframe) {
-      finalizeIncomeRegistration({
-        amount,
-        timeframe: pendingIncomeData.timeframe,
-        source: pendingIncomeData.source || 'Ingreso',
-        fixedPayments: pendingIncomeData.fixedPayments || 0
-      });
-      return;
-    }
-
-    setPendingIncomeData({
-      amount,
-      isCorrectingAmount: false
-    });
+  const handleIncomeAmountStep = (amount: number) => {
+    setPendingIncome((prev) => ({ ...prev, amount }));
     setFlowState('AWAITING_INCOME_TIMEFRAME');
-
     sendBotReply(
       '¿Esta plata es para hoy o para toda la semana?',
       [
-        { id: 'tf_today', label: '☀️ Solo hoy', action: 'action_income_timeframe', payload: 'today' },
-        { id: 'tf_week', label: '📅 Toda la semana', action: 'action_income_timeframe', payload: 'week' },
+        { id: 'tf_today', label: 'Solo hoy', action: 'action_income_timeframe', payload: 'today' },
+        { id: 'tf_week', label: 'Toda la semana', action: 'action_income_timeframe', payload: 'week' },
         { id: 'tf_back', label: '⬅️ Atrás', action: 'action_income_start' }
       ]
     );
   };
 
-  // Paso 2 procesado -> Preguntar Paso 3 (de dónde viene)
-  const handleIncomeTimeframeChosen = (timeframe: 'today' | 'week') => {
-    setPendingIncomeData((prev) => ({
-      ...prev,
-      timeframe
-    }));
-    setFlowState('AWAITING_INCOME_SOURCE');
+  const handleIncomeTimeframeStep = (timeframe: 'today' | 'week') => {
+    const updated = { ...pendingIncome, timeframe };
+    setPendingIncome(updated);
 
-    sendBotReply(
-      '¿De dónde viene esta plata? (opcional)',
-      [
-        { id: 'src_trabajo', label: '💼 Trabajo', action: 'action_income_source', payload: 'Trabajo' },
-        { id: 'src_venta', label: '🛒 Venta', action: 'action_income_source', payload: 'Venta' },
-        { id: 'src_regalo', label: '🎁 Regalo/Apoyo', action: 'action_income_source', payload: 'Regalo/Apoyo' },
-        { id: 'src_otro', label: '✍️ Otro', action: 'action_income_custom_source_prompt' },
-        { id: 'src_skip', label: '⏩ Omitir', action: 'action_income_source', payload: 'Ingreso' },
-        { id: 'src_back', label: '⬅️ Atrás', action: 'action_income_back_to_timeframe' }
-      ]
-    );
-  };
-
-  // Paso 3 procesado -> Verificar si toca Paso 4 (pagos fijos la primera vez)
-  const handleIncomeSourceChosen = (source: string) => {
-    const updatedData = {
-      ...pendingIncomeData,
-      source
-    };
-    setPendingIncomeData(updatedData);
-
-    // Paso 4: solo la primera vez si no se ha preguntado antes
-    if (!hasAskedFixedPaymentsOnce) {
-      setFlowState('AWAITING_INCOME_FIXED_ASK');
+    // Si es "Toda la semana", preguntamos pagos fijos. Si es "Solo hoy", no aplica.
+    if (timeframe === 'week') {
+      setFlowState('AWAITING_INCOME_FIXED_AMOUNT');
       sendBotReply(
-        '¿Tienes pagos fijos esta semana (arriendo, internet)? Si no, omite.',
+        '¿Tienes pagos fijos esta semana (arriendo, internet)? Si tienes, pon el monto:',
         [
-          { id: 'fix_yes', label: '📝 Sí, poner monto', action: 'action_income_fixed_prompt' },
-          { id: 'fix_skip', label: '⏩ Omitir', action: 'action_income_finalize_with_fixed', payload: 0 },
-          { id: 'fix_back', label: '⬅️ Atrás', action: 'action_income_back_to_source' }
+          { id: 'fix_0', label: 'Sin pagos fijos', action: 'action_income_fixed_chosen', payload: 0 },
+          { id: 'fix_30', label: '$30', action: 'action_income_fixed_chosen', payload: 30 },
+          { id: 'fix_50', label: '$50', action: 'action_income_fixed_chosen', payload: 50 },
+          { id: 'fix_otro', label: 'Otro monto', action: 'action_income_custom_fixed' },
+          { id: 'fix_back', label: '⬅️ Atrás', action: 'action_income_back_to_timeframe' }
         ]
       );
     } else {
-      finalizeIncomeRegistration({
-        amount: updatedData.amount || 0,
-        timeframe: updatedData.timeframe || 'week',
-        source: updatedData.source || 'Ingreso',
-        fixedPayments: 0
-      });
+      finalizeIncome(updated.amount || 0, 'today', 0);
     }
   };
 
-  // Paso 4: calcular y confirmar (pregunta antes si quiere ahorrar en la bóveda sin obligar)
-  const finalizeIncomeRegistration = (params: {
-    amount: number;
-    timeframe: 'today' | 'week';
-    source: string;
-    fixedPayments: number;
-  }) => {
-    // Si la bóveda nunca ha sido configurada o decidida, pregunta antes de guardar si desea ahorrar
-    if (!bovedaConfig.configured) {
-      setPendingIncomeForBoveda(params);
-      startBovedaFlow('income_first_time');
-      return;
-    }
-
-    executeIncomeCalculationAndMessage(params, bovedaConfig.percentage / 100);
-  };
-
-  const executeIncomeCalculationAndMessage = (
-    params: {
-      amount: number;
-      timeframe: 'today' | 'week';
-      source: string;
-      fixedPayments: number;
-    },
-    porcentajeActual: number
-  ) => {
-    try {
-      const { amount, timeframe, source, fixedPayments } = params;
-      setHasAskedFixedPaymentsOnce(true);
-
-      const prevSaldo = saldoRealGastable;
-      const prevBoveda = bovedaTotal;
-      const prevSemanal = saldoSemanalAcumulado;
-
-      let bovedaAmount = 0;
-      let dailyAdded = 0;
-      let newSaldo = 0;
-      let newBoveda = prevBoveda;
-      let confirmationText = '';
-      let nuevoSemanal = prevSemanal;
-
-      // REGLA: Si el saldo está en negativo cuando entra un ingreso:
-      // 1. Resta el saldo negativo del ingreso.
-      // 2. Bóveda = porcentaje elegido de lo que queda (si porcentaje es 0, no guarda nada).
-      // 3. El saldo de hoy se calcula con el resto, según "Solo hoy" o "Toda la semana".
-      if (prevSaldo < 0) {
-        const negativoACubrir = Math.abs(prevSaldo);
-
-        if (amount > negativoACubrir) {
-          const remanente = Math.round((amount - negativoACubrir) * 100) / 100;
-          bovedaAmount = Math.round(remanente * porcentajeActual * 100) / 100;
-          const disponible = Math.round((remanente - bovedaAmount) * 100) / 100;
-
-          if (timeframe === 'today') {
-            dailyAdded = disponible;
-          } else {
-            const netoSemana = Math.max(0, disponible - fixedPayments);
-            const diasFaltantes = Math.max(1, DIAS_SEMANA - diaActual + 1);
-            dailyAdded = Math.round((netoSemana / diasFaltantes) * 100) / 100;
-            nuevoSemanal = Math.round((prevSemanal + netoSemana) * 100) / 100;
-          }
-
-          newSaldo = dailyAdded;
-          newBoveda = Math.round((prevBoveda + bovedaAmount) * 100) / 100;
-
-          if (bovedaAmount > 0) {
-            confirmationText = `🎉 ¡Listo! Cubrí tus −$${formatMoney(negativoACubrir)} y guardé $${formatMoney(bovedaAmount)} en tu Bóveda Anti-Impulso 🔒. Hoy puedes gastar $${formatMoney(newSaldo)}.`;
-          } else {
-            confirmationText = `🎉 ¡Listo! Cubrí tus −$${formatMoney(negativoACubrir)}. Hoy puedes gastar $${formatMoney(newSaldo)}.`;
-          }
-        } else if (amount === negativoACubrir) {
-          bovedaAmount = 0;
-          newSaldo = 0;
-          confirmationText = `🎉 ¡Listo! Cubrí tus −$${formatMoney(negativoACubrir)}. Tu saldo hoy quedó en $0.`;
-        } else {
-          bovedaAmount = 0;
-          newSaldo = Math.round((prevSaldo + amount) * 100) / 100;
-          const restanteNegativo = Math.abs(newSaldo);
-          confirmationText = `Sumé tu ingreso. Todavía estás en −$${formatMoney(restanteNegativo)}, pero vas bajando 💪`;
-        }
-      } else {
-        // Saldo previo >= 0: cálculo estándar
-        bovedaAmount = Math.round(amount * porcentajeActual * 100) / 100;
-
-        if (timeframe === 'today') {
-          dailyAdded = Math.round((amount - bovedaAmount) * 100) / 100;
-        } else {
-          const netoSemana = Math.max(0, amount - bovedaAmount - fixedPayments);
-          const diasFaltantes = Math.max(1, DIAS_SEMANA - diaActual + 1);
-          dailyAdded = Math.round((netoSemana / diasFaltantes) * 100) / 100;
-          nuevoSemanal = Math.round((prevSemanal + netoSemana) * 100) / 100;
-        }
-
-        newSaldo = Math.round((prevSaldo + dailyAdded) * 100) / 100;
-        newBoveda = Math.round((prevBoveda + bovedaAmount) * 100) / 100;
-
-        const isFirst = incomesWeekly.length === 0;
-        if (bovedaAmount > 0) {
-          if (isFirst) {
-            confirmationText = `🎉 ¡Listo! Guardé $${formatMoney(bovedaAmount)} en tu Bóveda Anti-Impulso 🔒. Hoy puedes gastar $${formatMoney(newSaldo)}.`;
-          } else {
-            confirmationText = `💸 Sumé este ingreso. Guardé $${formatMoney(bovedaAmount)} en tu Bóveda Anti-Impulso 🔒. Hoy puedes gastar $${formatMoney(newSaldo)}.`;
-          }
-        } else {
-          if (isFirst) {
-            confirmationText = `🎉 ¡Listo! Ingreso registrado. Hoy puedes gastar $${formatMoney(newSaldo)}.`;
-          } else {
-            confirmationText = `💸 Sumé este ingreso. Hoy puedes gastar $${formatMoney(newSaldo)}.`;
-          }
+  const finalizeIncome = (amount: number, timeframe: 'today' | 'week', fixedPayments: number) => {
+    // Si la bóveda está activa y configurada, calculamos su apartado si no ha llegado a la meta
+    let bovedaApartada = 0;
+    if (bovedaConfig.configured && bovedaConfig.active && bovedaConfig.percentage > 0) {
+      if (bovedaConfig.targetAmount === 0 || bovedaTotal < bovedaConfig.targetAmount) {
+        bovedaApartada = Math.round((amount * (bovedaConfig.percentage / 100)) * 100) / 100;
+        // No pasar de la meta si hay una meta fija
+        if (bovedaConfig.targetAmount > 0 && bovedaTotal + bovedaApartada > bovedaConfig.targetAmount) {
+          bovedaApartada = Math.max(0, bovedaConfig.targetAmount - bovedaTotal);
         }
       }
-
-      const newIncome: Income = {
-        id: 'inc_' + Date.now(),
-        amount,
-        timeframe,
-        source,
-        fixedPayments,
-        bovedaAmount,
-        dailyAdded,
-        time: getFormattedTime()
-      };
-
-      setSaldoRealGastable(newSaldo);
-      setSaldoSemanalAcumulado(nuevoSemanal);
-      setBovedaTotal(newBoveda);
-      setAhorroActual(newBoveda);
-      setIncomesWeekly((prev) => [newIncome, ...prev]);
-
-      // Guardar snapshot para permitir deshacer o corregir
-      setLastIncomeSnapshot({
-        income: newIncome,
-        previousSaldo: prevSaldo,
-        previousBoveda: prevBoveda,
-        previousSemanal: prevSemanal
-      });
-
-      setFlowState('MENU');
-      setPendingIncomeData(null);
-      setPendingIncomeForBoveda(null);
-
-      sendBotReply(
-        confirmationText,
-        [
-          { id: 'btn_inc_undo', label: '↩️ Deshacer', action: 'action_income_undo' },
-          { id: 'btn_inc_edit', label: '✏️ Corregir monto', action: 'action_income_edit_amount' },
-          { id: 'btn_inc_reg', label: '🧾 Registrar gasto', action: 'action_register' },
-          { id: 'btn_inc_sal', label: '💰 Mi saldo de hoy', action: 'action_balance' },
-          { id: 'btn_inc_menu', label: '⬅️ Menú', action: 'action_menu' }
-        ]
-      );
-    } catch (err) {
-      console.error(err);
-      sendBotReply('Ocurrió un detalle al guardar el ingreso 😅 ¿Volvemos al menú?', MAIN_MENU_BUTTONS);
-    }
-  };
-
-  // Deshacer ingreso
-  const handleUndoIncome = () => {
-    if (!lastIncomeSnapshot) {
-      sendBotReply('No hay ningún ingreso reciente para deshacer 👍', MAIN_MENU_BUTTONS);
-      return;
     }
 
-    const { income, previousSaldo, previousBoveda, previousSemanal } = lastIncomeSnapshot;
-    setSaldoRealGastable(previousSaldo);
-    setSaldoSemanalAcumulado(previousSemanal);
-    setBovedaTotal(previousBoveda);
-    setAhorroActual(previousBoveda);
-    setIncomesWeekly((prev) => prev.filter((i) => i.id !== income.id));
-    setLastIncomeSnapshot(null);
+    const newIncome: Income = {
+      id: 'inc_' + Date.now(),
+      amount,
+      timeframe,
+      source: 'Ingreso',
+      fixedPayments,
+      bovedaAmount: bovedaApartada,
+      dayAdded: diaActual,
+      time: getFormattedTime()
+    };
+
+    setIncomesList((prev) => [newIncome, ...prev]);
+    if (bovedaApartada > 0) {
+      setBovedaTotal((prev) => Math.round((prev + bovedaApartada) * 100) / 100);
+    }
+
+    setLastAction({ type: 'income', id: newIncome.id });
+    setPendingIncome(null);
+    setFlowState('MENU');
+
+    // Cálculo exacto del nuevo saldo de hoy según la fórmula:
+    // Saldo de hoy = (ingresos de la semana − bóveda − fijos − gastos de días anteriores) ÷ días que quedan − gastos de hoy
+    const newIngresosSemana = ingresosDeLaSemana + amount;
+    const newBovedaSemana = bovedaDeLaSemana + bovedaApartada;
+    const newFijosSemana = fijosDeLaSemana + fixedPayments;
+    const newFondoSemana = newIngresosSemana - newBovedaSemana - newFijosSemana - gastosDiasAnteriores;
+    const newCuota = Math.round((newFondoSemana / diasQueQuedan) * 100) / 100;
+    const newSaldoHoyCalculado = Math.round((newCuota - gastosHoy) * 100) / 100;
+
+    let confirmMsg = `¡Listo! Sumé tu ingreso de $${formatMoney(amount)}.`;
+    if (bovedaApartada > 0) {
+      confirmMsg += ` Guardé $${formatMoney(bovedaApartada)} en tu Bóveda Anti-Impulso 🔒.`;
+    }
+    confirmMsg += ` Hoy puedes gastar ${formatBalance(newSaldoHoyCalculado)}.`;
 
     sendBotReply(
-      `Listo, borré ese ingreso ↩️. Hoy estás en ${formatBalance(previousSaldo)}.`,
-      MAIN_MENU_BUTTONS
-    );
-  };
-
-  // Corregir monto de ingreso
-  const handleStartCorrectIncomeAmount = () => {
-    if (!lastIncomeSnapshot) {
-      startIncomeFlow();
-      return;
-    }
-
-    const { income, previousSaldo, previousBoveda, previousSemanal } = lastIncomeSnapshot;
-    setSaldoRealGastable(previousSaldo);
-    setSaldoSemanalAcumulado(previousSemanal);
-    setBovedaTotal(previousBoveda);
-    setAhorroActual(previousBoveda);
-    setIncomesWeekly((prev) => prev.filter((i) => i.id !== income.id));
-
-    setPendingIncomeData({
-      timeframe: income.timeframe,
-      source: income.source,
-      fixedPayments: income.fixedPayments,
-      isCorrectingAmount: true
-    });
-    setFlowState('AWAITING_INCOME_AMOUNT');
-
-    sendBotReply(
-      'Escribe el monto correcto de tu ingreso ✏️ (por ejemplo: "150"):',
+      confirmMsg,
       [
-        { id: 'c_50', label: '💵 $50', action: 'action_income_sample_amount', payload: 50 },
-        { id: 'c_100', label: '💵 $100', action: 'action_income_sample_amount', payload: 100 },
-        { id: 'c_150', label: '💵 $150', action: 'action_income_sample_amount', payload: 150 },
-        { id: 'c_menu', label: '⬅️ Menú', action: 'action_menu' }
+        { id: 'btn_undo_inc', label: '↩️ Deshacer', action: 'action_undo_last_action' },
+        { id: 'btn_reg_after_inc', label: '➕ Registrar gasto', action: 'action_register' },
+        { id: 'btn_sal_after_inc', label: '💰 Mi saldo', action: 'action_balance' },
+        { id: 'btn_menu_after_inc', label: '☰ Menú', action: 'action_menu' }
+      ]
+    );
+
+    // D2: Si la bóveda NUNCA ha sido configurada, se ofrece en un mensaje aparte DESPUÉS
+    if (!bovedaConfig.configured) {
+      setTimeout(() => {
+        startBovedaSetupOffer(amount);
+      }, 1300);
+    }
+  };
+
+  // ==========================================================================
+  // FLUJO DE BÓVEDA (D2: PARA QUÉ -> CUÁNTO -> PLAZO -> PROPUESTA INTELIGENTE)
+  // ==========================================================================
+  const startBovedaSetupOffer = (incomeContextAmount?: number) => {
+    setFlowState('BOVEDA_OFFER_DECISION');
+    setPendingBovedaSetup({ percentage: 0 });
+    sendBotReply(
+      '¿Quieres apartar un ahorro para una meta en tu Bóveda Anti-Impulso? 🔒',
+      [
+        { id: 'bov_yes', label: 'Sí, quiero ahorrar', action: 'action_boveda_accept_offer', payload: incomeContextAmount },
+        { id: 'bov_no', label: 'Ahora no', action: 'action_boveda_decline_offer' }
       ]
     );
   };
 
-  // ==========================================================================
-  // BÓVEDA ANTI-IMPULSO (PREGUNTA ANTES SI QUIERE AHORRAR, SIN OBLIGAR)
-  // ==========================================================================
-  const startBovedaFlow = (source: 'income_first_time' | 'menu' = 'menu') => {
-    setPendingBovedaData({ sourceFlow: source });
-    setFlowState('BOVEDA_ASK_DECISION');
-
-    const introText = source === 'income_first_time'
-      ? 'Antes de guardar, ¿configuramos tu Bóveda Anti-Impulso? 🔒\n\n¿Quieres apartar un ahorro de tu dinero?'
-      : '¿Quieres apartar un ahorro en tu Bóveda Anti-Impulso? 🔒';
-
+  const handleBovedaAskReason = () => {
+    setFlowState('BOVEDA_ASK_REASON');
     sendBotReply(
-      introText,
+      '¿Para qué es este ahorro? Cuéntame tu meta:',
       [
-        { id: 'bov_yes', label: '✅ Sí, quiero ahorrar', action: 'action_boveda_yes' },
-        { id: 'bov_no', label: '❌ No quiero ahorrar', action: 'action_boveda_no' },
-        { id: 'bov_back_start', label: '⬅️ Atrás', action: 'action_menu' }
+        { id: 'br_viaje', label: 'Un viaje', action: 'action_boveda_reason_chosen', payload: 'Un viaje' },
+        { id: 'br_celular', label: 'Un celular', action: 'action_boveda_reason_chosen', payload: 'Un celular' },
+        { id: 'br_emerg', label: 'Emergencias', action: 'action_boveda_reason_chosen', payload: 'Emergencias' },
+        { id: 'br_otro', label: 'Otra meta', action: 'action_boveda_reason_custom' },
+        { id: 'br_back', label: '⬅️ Atrás', action: 'action_menu' }
       ]
     );
   };
 
-  // Usuario decide que SÍ quiere ahorrar -> le damos las 4 preguntas
-  const handleBovedaDecisionYes = () => {
+  const handleBovedaAskAmount = (reason: string) => {
+    setPendingBovedaSetup((prev) => ({ ...prev, reason }));
     setFlowState('BOVEDA_ASK_AMOUNT');
     sendBotReply(
-      '¿Cuánto quieres ahorrar en total? 🎯',
+      '¿Cuánto quieres lograr en total?',
       [
-        { id: 'bov_amt_50', label: '🎯 $50', action: 'action_boveda_amount', payload: 50 },
-        { id: 'bov_amt_100', label: '🎯 $100', action: 'action_boveda_amount', payload: 100 },
-        { id: 'bov_amt_200', label: '🎯 $200', action: 'action_boveda_amount', payload: 200 },
-        { id: 'bov_amt_other', label: '✍️ Otro', action: 'action_boveda_amount_prompt' },
-        { id: 'bov_back_decision', label: '⬅️ Atrás', action: 'action_boveda_back_to_decision' }
+        { id: 'ba_50', label: '$50', action: 'action_boveda_amount_chosen', payload: 50 },
+        { id: 'ba_100', label: '$100', action: 'action_boveda_amount_chosen', payload: 100 },
+        { id: 'ba_200', label: '$200', action: 'action_boveda_amount_chosen', payload: 200 },
+        { id: 'ba_otro', label: 'Otro monto', action: 'action_boveda_amount_custom' },
+        { id: 'ba_back', label: '⬅️ Atrás', action: 'action_boveda_back_to_reason' }
       ]
     );
   };
 
-  // Usuario decide que NO quiere ahorrar -> cierra y va al menú por defecto (o completa el ingreso con 0% ahorro)
-  const handleBovedaDecisionNo = () => {
-    setBovedaConfig({
-      configured: true,
-      targetAmount: 0,
-      reason: 'Sin ahorro',
-      deadline: '',
-      percentage: 0
-    });
-
-    if (pendingBovedaData?.sourceFlow === 'income_first_time' && pendingIncomeForBoveda) {
-      const incomeToProcess = pendingIncomeForBoveda;
-      setPendingIncomeForBoveda(null);
-      setPendingBovedaData(null);
-      executeIncomeCalculationAndMessage(incomeToProcess, 0);
-    } else {
-      setFlowState('MENU');
-      setPendingBovedaData(null);
-      sendBotReply(
-        '¡Listo! 👍 No apartaremos nada para la bóveda. Tu dinero queda 100% disponible para gastar.',
-        MAIN_MENU_BUTTONS
-      );
-    }
-  };
-
-  const handleBovedaAmountChosen = (targetAmount: number) => {
-    setPendingBovedaData((prev) => ({ ...prev, targetAmount }));
-    setFlowState('BOVEDA_ASK_REASON');
-
-    sendBotReply(
-      '¿Para qué es este ahorro? Cuéntame en una frase 💬',
-      [
-        { id: 'bov_r_viaje', label: '✈️ Un viaje', action: 'action_boveda_reason', payload: 'Un viaje' },
-        { id: 'bov_r_celular', label: '📱 Un celular', action: 'action_boveda_reason', payload: 'Un celular' },
-        { id: 'bov_r_emergencia', label: '🛟 Emergencias', action: 'action_boveda_reason', payload: 'Emergencias' },
-        { id: 'bov_r_otro', label: '✍️ Otro', action: 'action_boveda_reason_prompt' },
-        { id: 'bov_back_amt', label: '⬅️ Atrás', action: 'action_boveda_back_to_amount' }
-      ]
-    );
-  };
-
-  const handleBovedaReasonChosen = (reason: string) => {
-    setPendingBovedaData((prev) => ({ ...prev, reason }));
+  const handleBovedaAskDeadline = (targetAmount: number) => {
+    setPendingBovedaSetup((prev) => ({ ...prev, targetAmount }));
     setFlowState('BOVEDA_ASK_DEADLINE');
-
     sendBotReply(
-      '¿En cuánto tiempo quieres lograrlo? ⏱️',
+      '¿En cuánto tiempo quieres lograrlo?',
       [
-        { id: 'bov_d_1m', label: '⏱️ 1 mes', action: 'action_boveda_deadline', payload: '1 mes' },
-        { id: 'bov_d_3m', label: '⏱️ 3 meses', action: 'action_boveda_deadline', payload: '3 meses' },
-        { id: 'bov_d_6m', label: '⏱️ 6 meses', action: 'action_boveda_deadline', payload: '6 meses' },
-        { id: 'bov_d_otro', label: '✍️ Otro', action: 'action_boveda_deadline_prompt' },
-        { id: 'bov_back_reason', label: '⬅️ Atrás', action: 'action_boveda_back_to_reason' }
+        { id: 'bd_1m', label: '1 mes', action: 'action_boveda_deadline_chosen', payload: { deadline: '1 mes', months: 1 } },
+        { id: 'bd_3m', label: '3 meses', action: 'action_boveda_deadline_chosen', payload: { deadline: '3 meses', months: 3 } },
+        { id: 'bd_6m', label: '6 meses', action: 'action_boveda_deadline_chosen', payload: { deadline: '6 meses', months: 6 } },
+        { id: 'bd_otro', label: 'Otro plazo', action: 'action_boveda_deadline_custom' },
+        { id: 'bd_back', label: '⬅️ Atrás', action: 'action_boveda_back_to_amount' }
       ]
     );
   };
 
-  const handleBovedaDeadlineChosen = (deadline: string) => {
-    setPendingBovedaData((prev) => ({ ...prev, deadline }));
+  const handleBovedaProposal = (deadlineStr: string, monthsCount: number) => {
+    const target = pendingBovedaSetup?.targetAmount || 100;
+    const weeks = Math.max(1, monthsCount * 4);
+    const aporteSemanalEstimado = Math.round((target / weeks) * 100) / 100;
+
+    // Calcular el porcentaje sugerido respecto al ingreso semanal (o base $100 si no hay aún)
+    const baseIngreso = ingresosDeLaSemana > 0 ? ingresosDeLaSemana : 100;
+    const suggestedPct = Math.min(30, Math.max(5, Math.round((aporteSemanalEstimado / baseIngreso) * 100)));
+
+    setPendingBovedaSetup((prev) => ({ ...prev, deadline: deadlineStr }));
     setFlowState('BOVEDA_ASK_PERCENTAGE');
 
     sendBotReply(
-      '¿Qué parte de tu dinero de la semana quieres guardar para esto? 📊',
+      `Para $${formatMoney(target)} en ${deadlineStr} necesitas ~$${formatMoney(aporteSemanalEstimado)} por semana (aprox. ${suggestedPct}% de tu ingreso). ¿Qué porcentaje apartamos de tus ingresos?`,
       [
-        { id: 'bov_p_10', label: '📊 10%', action: 'action_boveda_percentage', payload: 10 },
-        { id: 'bov_p_20', label: '📊 20%', action: 'action_boveda_percentage', payload: 20 },
-        { id: 'bov_p_30', label: '📊 30%', action: 'action_boveda_percentage', payload: 30 },
-        { id: 'bov_p_otro', label: '✍️ Otro', action: 'action_boveda_percentage_prompt' },
-        { id: 'bov_back_dl', label: '⬅️ Atrás', action: 'action_boveda_back_to_deadline' }
+        { id: 'bp_sug', label: `${suggestedPct}%`, action: 'action_boveda_percentage_chosen', payload: suggestedPct },
+        { id: 'bp_10', label: '10%', action: 'action_boveda_percentage_chosen', payload: 10 },
+        { id: 'bp_15', label: '15%', action: 'action_boveda_percentage_chosen', payload: 15 },
+        { id: 'bp_otro', label: 'Otro %', action: 'action_boveda_percentage_custom' },
+        { id: 'bp_back', label: '⬅️ Atrás', action: 'action_boveda_back_to_deadline' }
       ]
     );
   };
 
-  const finalizeBovedaConfiguration = (percentage: number) => {
-    const targetAmount = pendingBovedaData?.targetAmount || 100;
-    const reason = pendingBovedaData?.reason || 'Ahorro anti-impulso';
-    const deadline = pendingBovedaData?.deadline || '3 meses';
+  const finalizeBovedaSetup = (percentage: number) => {
+    const validPct = Math.min(50, Math.max(1, percentage));
+    const target = pendingBovedaSetup?.targetAmount || 100;
+    const reason = pendingBovedaSetup?.reason || 'Ahorro';
+    const deadline = pendingBovedaSetup?.deadline || '3 meses';
 
-    const newConfig: BovedaConfig = {
+    setBovedaConfig({
       configured: true,
-      targetAmount,
+      active: true,
+      targetAmount: target,
       reason,
       deadline,
-      percentage
-    };
+      percentage: validPct
+    });
 
-    setBovedaConfig(newConfig);
+    setPendingBovedaSetup(null);
+    setFlowState('MENU');
 
-    let confirmationText = '';
-    if (percentage > 0) {
-      confirmationText = `✅ Listo. Tu meta: $${formatMoney(targetAmount)} para ${reason} en ${deadline}. Cada semana guardo el ${percentage}% de lo que recibas 🔒.`;
-    } else {
-      confirmationText = `✅ Listo. No apartaremos dinero para la bóveda. Todo tu dinero queda libre para gastar 👍.`;
+    sendBotReply(
+      `Listo 🔒 Apartaré el ${validPct}% de tus próximos ingresos para tu meta de $${formatMoney(target)} en ${reason}.`,
+      MAIN_MENU_BUTTONS
+    );
+  };
+
+  // Ver estado de Bóveda desde el menú
+  const handleShowBovedaStatus = () => {
+    if (!bovedaConfig.configured || !bovedaConfig.active) {
+      sendBotReply(
+        'Tu Bóveda Anti-Impulso está inactiva (0% de ahorro). ¿Quieres configurarla para guardar algo de tus ingresos?',
+        [
+          { id: 'bv_act', label: 'Configurar bóveda', action: 'action_boveda_start_setup' },
+          { id: 'bv_men', label: '⬅️ Menú', action: 'action_menu' }
+        ]
+      );
+      return;
     }
 
-    // Si veníamos del registro del primer ingreso, confirmamos la bóveda e inmediatamente procesamos el ingreso
-    if (pendingBovedaData?.sourceFlow === 'income_first_time' && pendingIncomeForBoveda) {
-      sendBotReply(confirmationText, undefined, { delayMs: 400 });
-      setTimeout(() => {
-        executeIncomeCalculationAndMessage(pendingIncomeForBoveda, percentage / 100);
-      }, 1100);
-    } else {
-      setFlowState('MENU');
-      setPendingBovedaData(null);
+    const pct = bovedaConfig.targetAmount > 0 
+      ? Math.min(100, Math.round((bovedaTotal / bovedaConfig.targetAmount) * 100))
+      : 0;
+    const filledBlocks = Math.round(pct / 10);
+    const bar = '█'.repeat(filledBlocks) + '░'.repeat(Math.max(0, 10 - filledBlocks));
+
+    sendBotReply(
+      `🔒 Tu Bóveda Anti-Impulso\n\nMeta: $${formatMoney(bovedaConfig.targetAmount)} para ${bovedaConfig.reason}\nAhorrado: $${formatMoney(bovedaTotal)} / $${formatMoney(bovedaConfig.targetAmount)} (${pct}%)\n[${bar}]\nPlazo: en ${bovedaConfig.deadline}\nAporte: ${bovedaConfig.percentage}% por ingreso`,
+      [
+        { id: 'bvm_edit', label: 'Cambiar meta', action: 'action_boveda_start_setup' },
+        { id: 'bvm_pause', label: 'Pausar bóveda', action: 'action_boveda_pause_toggle' },
+        { id: 'bvm_men', label: '⬅️ Menú', action: 'action_menu' }
+      ]
+    );
+  };
+
+  // ==========================================================================
+  // FLUJO DE REGISTRO DE GASTO (D6: REGISTRAR DIRECTO EN 'OTROS' SI NO HAY CATEGORÍA)
+  // ==========================================================================
+  const executeRegisterExpense = (
+    amount: number, 
+    category: ExpenseCategory, 
+    desc: string,
+    wasCategoryAssignedAutomatically: boolean = false
+  ) => {
+    const timeStr = getFormattedTime();
+    const cleanDesc = cleanExpenseDescription(desc, category);
+
+    const newExpense: Expense = {
+      id: 'exp_' + Date.now(),
+      amount,
+      category,
+      description: cleanDesc,
+      time: timeStr,
+      dayNumber: diaActual
+    };
+
+    setExpensesList((prev) => [newExpense, ...prev]);
+    setLastAction({ type: 'expense', id: newExpense.id });
+    setFlowState('MENU');
+
+    const newSaldo = Math.round((saldoDeHoy - amount) * 100) / 100;
+    const formattedAmount = formatMoney(amount);
+
+    // D5: Alerta del 80% (una vez al día cuando se gaste el 80% del saldo inicial)
+    const totalDespuesDeGasto = gastosHoy + amount;
+    const check80 = !hasTriggered80Today && disponibleHoyInicial > 0 && totalDespuesDeGasto >= disponibleHoyInicial * 0.8;
+
+    if (newSaldo < 0) {
       sendBotReply(
-        confirmationText,
+        `✅ Gasto registrado: $${formattedAmount} en ${category}. Hoy estás en ${formatBalance(newSaldo)} 💛 Lo equilibraremos en los siguientes días.`,
         [
-          { id: 'bov_change', label: '✏️ Cambiar', action: 'action_boveda_start' },
-          { id: 'bov_reg', label: '🧾 Registrar gasto', action: 'action_register' },
-          { id: 'bov_menu', label: '⬅️ Menú', action: 'action_menu' }
+          { id: 'u_exp', label: '↩️ Deshacer', action: 'action_undo_last_action' },
+          ...(wasCategoryAssignedAutomatically ? [{ id: 'cat_chg', label: 'Cambiar categoría', action: 'action_change_last_category', payload: newExpense.id }] : []),
+          { id: 'r_another', label: '➕ Registrar otro', action: 'action_register' },
+          { id: 'r_menu', label: '☰ Menú', action: 'action_menu' }
+        ],
+        { isAmberAlert: true }
+      );
+    } else {
+      sendBotReply(
+        `✅ Gasto registrado: $${formattedAmount} en ${category} (${timeStr}).\n\nTu saldo de hoy es ${formatBalance(newSaldo)}.`,
+        [
+          { id: 'u_exp', label: '↩️ Deshacer', action: 'action_undo_last_action' },
+          ...(wasCategoryAssignedAutomatically ? [{ id: 'cat_chg', label: 'Cambiar categoría', action: 'action_change_last_category', payload: newExpense.id }] : []),
+          { id: 'r_another', label: '➕ Registrar otro', action: 'action_register' },
+          { id: 'r_menu', label: '☰ Menú', action: 'action_menu' }
+        ]
+      );
+    }
+
+    if (check80) {
+      setHasTriggered80Today(true);
+      setTimeout(() => {
+        sendBotReply(
+          `⚠️ Llevas gastado el 80% de tu saldo de hoy ($${formatMoney(totalDespuesDeGasto)} de $${formatMoney(disponibleHoyInicial)}). Reto: evita otro gasto y guarda $2 en tu Bóveda 🔒 ¿Te sumas?`,
+          [
+            { id: 'n_yes', label: 'Me sumo ($2 a bóveda)', action: 'action_nudge_accept_2usd' },
+            { id: 'n_no', label: 'Ahora no', action: 'action_nudge_decline' }
+          ],
+          { isAmberAlert: true }
+        );
+      }, 1200);
+    }
+  };
+
+  // Deshacer el último movimiento
+  const handleUndoLastAction = () => {
+    if (!lastAction) {
+      sendBotReply('No hay ninguna acción reciente para deshacer 👍', MAIN_MENU_BUTTONS);
+      return;
+    }
+
+    if (lastAction.type === 'expense') {
+      const targetExpense = expensesList.find((e) => e.id === lastAction.id);
+      if (targetExpense) {
+        setExpensesList((prev) => prev.filter((e) => e.id !== lastAction.id));
+        setLastAction(null);
+        const restoredSaldo = Math.round((saldoDeHoy + targetExpense.amount) * 100) / 100;
+        sendBotReply(
+          `Listo ↩️ Cancelé el gasto de $${formatMoney(targetExpense.amount)} en ${targetExpense.category}. Tu saldo de hoy es ${formatBalance(restoredSaldo)}.`,
+          MAIN_MENU_BUTTONS
+        );
+        return;
+      }
+    } else if (lastAction.type === 'income') {
+      const targetIncome = incomesList.find((i) => i.id === lastAction.id);
+      if (targetIncome) {
+        setIncomesList((prev) => prev.filter((i) => i.id !== lastAction.id));
+        if (targetIncome.bovedaAmount > 0) {
+          setBovedaTotal((prev) => Math.max(0, Math.round((prev - targetIncome.bovedaAmount) * 100) / 100));
+        }
+        setLastAction(null);
+        sendBotReply(
+          `Listo ↩️ Cancelé ese ingreso de $${formatMoney(targetIncome.amount)}.`,
+          MAIN_MENU_BUTTONS
+        );
+        return;
+      }
+    }
+
+    sendBotReply('No hay ninguna acción para deshacer 👍', MAIN_MENU_BUTTONS);
+  };
+
+  // Cambiar categoría de gasto
+  const handleChangeExpenseCategory = (expenseId: string, newCat: ExpenseCategory) => {
+    setExpensesList((prev) =>
+      prev.map((e) => (e.id === expenseId ? { ...e, category: newCat } : e))
+    );
+    sendBotReply(`Listo, cambié la categoría a ${newCat} 👍`, MAIN_MENU_BUTTONS);
+  };
+
+  // ==========================================================================
+  // FLUJO ¿PUEDO COMPRAR? (D4: PAUSA 24 H REAL, REGISTRAR IGUAL, CONSULTA LIMPIA)
+  // ==========================================================================
+  const evaluatePurchase = (amount: number, itemDesc: string) => {
+    const formattedAmount = formatMoney(amount);
+
+    if (saldoDeHoy > 0 && amount <= saldoDeHoy) {
+      const rem = Math.round((saldoDeHoy - amount) * 100) / 100;
+      sendBotReply(
+        `🟢 Sí puedes. Si compras ${itemDesc} por $${formattedAmount}, te quedarían $${formatMoney(rem)} de saldo hoy. Esta consulta no resta nada.`,
+        [
+          { id: 'b_reg_now', label: '🛍️ Registrar compra', action: 'action_register_purchase_now', payload: { amount, item: itemDesc } },
+          { id: 'b_menu', label: '⬅️ Menú', action: 'action_menu' }
+        ]
+      );
+    } else {
+      const nuevoEstimado = Math.round((saldoDeHoy - amount) * 100) / 100;
+      sendBotReply(
+        `🟡 Si compras ${itemDesc} por $${formattedAmount}, quedarías en ${formatBalance(nuevoEstimado)} hoy. Recuerda que no se ha restado nada:`,
+        [
+          { id: 'b_pause', label: '⏱️ Pausa de 24 h', action: 'action_pause_purchase_24h', payload: { amount, item: itemDesc } },
+          { id: 'b_reg_anyway', label: '🛍️ Registrar igual', action: 'action_register_purchase_now', payload: { amount, item: itemDesc } },
+          { id: 'b_menu_neg', label: '⬅️ Menú', action: 'action_menu' }
+        ],
+        { isAmberAlert: true }
+      );
+    }
+  };
+
+  // Pausa de 24 horas real
+  const handleSavePausedPurchase = (amount: number, item: string) => {
+    const newPause: PausedPurchase = {
+      id: 'pause_' + Date.now(),
+      item,
+      amount,
+      time: getFormattedTime()
+    };
+    setPausedPurchases((prev) => [newPause, ...prev]);
+    sendBotReply(
+      `Listo ⏱️ Pausé ${item} ($${formatMoney(amount)}) por 24 h para enfriar el impulso. Te recordaré al cerrar el día.`,
+      MAIN_MENU_BUTTONS
+    );
+  };
+
+  // ==========================================================================
+  // MI SALDO
+  // ==========================================================================
+  const handleShowBalance = () => {
+    let bovedaLine = '';
+    if (bovedaConfig.configured && bovedaConfig.active && bovedaConfig.percentage > 0) {
+      const pct = bovedaConfig.targetAmount > 0 
+        ? Math.min(100, Math.round((bovedaTotal / bovedaConfig.targetAmount) * 100)) 
+        : 0;
+      bovedaLine = `\n🔒 Bóveda: $${formatMoney(bovedaTotal)} / $${formatMoney(bovedaConfig.targetAmount)} (${pct}%)`;
+    } else {
+      bovedaLine = `\n🔒 Bóveda: Inactiva (0% de ahorro)`;
+    }
+
+    if (saldoDeHoy < 0) {
+      sendBotReply(
+        `💰 Hoy estás en *${formatBalance(saldoDeHoy)}* 💛\n\nSaldo de la semana: *${formatBalance(saldoDeLaSemana)}*${bovedaLine}\n\nNo te preocupes, lo equilibraremos en los días siguientes.`,
+        [
+          { id: 'b_inc', label: '💵 Registrar ingreso', action: 'action_income_start' },
+          { id: 'b_men', label: '⬅️ Menú', action: 'action_menu' }
+        ],
+        { isAmberAlert: true }
+      );
+    } else {
+      sendBotReply(
+        `💰 Saldo de hoy: *${formatBalance(saldoDeHoy)}*\n\nSaldo de la semana: *${formatBalance(saldoDeLaSemana)}*${bovedaLine}\n\nDinero disponible libre de culpa para lo que queda del día.`,
+        [
+          { id: 'b_inc', label: '💵 Registrar ingreso', action: 'action_income_start' },
+          { id: 'b_reg', label: '➕ Registrar gasto', action: 'action_register' },
+          { id: 'b_buy', label: '🛍️ ¿Puedo comprar?', action: 'action_can_i_buy' },
+          { id: 'b_men', label: '☰ Menú', action: 'action_menu' }
         ]
       );
     }
   };
 
   // ==========================================================================
-  // FLUJO 1: REGISTRAR GASTO (SALDO NEGATIVO PERMITIDO EN ÁMBAR SIN CULPA)
+  // RESUMEN SEMANAL
   // ==========================================================================
-  const executeRegisterExpense = (amount: number, category: ExpenseCategory, desc: string) => {
-    try {
-      const timeStr = getFormattedTime();
-      const prevSaldo = saldoRealGastable;
-      const formattedAmount = formatMoney(amount);
+  const handleShowWeeklySummary = () => {
+    const totalIngresos = incomesList.reduce((sum, i) => sum + i.amount, 0);
+    const totalGastos = expensesList.reduce((sum, e) => sum + e.amount, 0);
 
-      // El saldo SÍ puede ser negativo. Se calcula su valor real sin ocultarlo ni forzarlo a $0.
-      const newSaldo = Math.round((prevSaldo - amount) * 100) / 100;
-
-      const newExpense: Expense = {
-        id: 'exp_' + Date.now(),
-        amount,
-        category,
-        description: desc,
-        time: timeStr
-      };
-
-      setExpensesToday((prev) => [newExpense, ...prev]);
-      setExpensesWeekly((prev) => [newExpense, ...prev]);
-      setSaldoRealGastable(newSaldo);
-
-      // Guardar snapshot para permitir deshacer
-      setLastExpenseSnapshot({
-        expense: newExpense,
-        previousSaldo: prevSaldo
-      });
-
-      setFlowState('MENU');
-      setPendingExpenseData(null);
-
-      // Si el saldo resultante es negativo: mensaje en color ámbar, tono amable y sin culpa
-      if (newSaldo < 0) {
-        const formattedSaldo = formatBalance(newSaldo); // ej. "−$5"
-        const amberMsg = `✅ Gasto registrado: $${formattedAmount} en ${category}. Hoy estás en ${formattedSaldo} 💛 Cuando registres un ingreso, primero cubrimos esto.`;
-
-        sendBotReply(
-          amberMsg,
-          [
-            { id: 'btn_undo', label: '↩️ Deshacer', action: 'action_undo_last' },
-            { id: 'btn_inc_from_neg', label: '💵 Registrar ingreso', action: 'action_income_start' },
-            { id: 'btn_reg_another', label: '➕ Registrar otro', action: 'action_register' },
-            { id: 'btn_menu_after_reg', label: '☰ Menú', action: 'action_menu' }
-          ],
-          { isAmberAlert: true }
-        );
-      } else {
-        const formattedSaldo = formatMoney(newSaldo);
-        const exactMsg = `✅ ¡Listo! Gasto registrado: $${formattedAmount} en ${category} (${timeStr}).\n\nTu saldo real gastable para hoy es de $${formattedSaldo}`;
-
-        sendBotReply(exactMsg, [
-          { id: 'btn_undo', label: '↩️ Deshacer', action: 'action_undo_last' },
-          { id: 'btn_reg_another', label: '➕ Registrar otro', action: 'action_register' },
-          { id: 'btn_menu_after_reg', label: '☰ Menú', action: 'action_menu' }
-        ]);
-      }
-
-      // Evaluar gatillador automático de ocio al 80%
-      const currentOcioTotal = [...expensesWeekly, newExpense]
-        .filter((e) => e.category === 'Ocio')
-        .reduce((sum, e) => sum + e.amount, 0);
-
-      const ocio80Percent = PRESUPUESTO_OCIO_SEMANAL * 0.8; // $12
-
-      if (category === 'Ocio' && currentOcioTotal >= ocio80Percent) {
-        setTimeout(() => {
-          triggerNudgeOcio80();
-        }, 1200);
-      }
-    } catch (e) {
-      console.error(e);
-      sendBotReply('Ocurrió un detalle al registrar 😅 ¿Quieres volver al menú?', MAIN_MENU_BUTTONS);
-    }
-  };
-
-  // Deshacer el último gasto registrado
-  const handleUndoLastExpense = () => {
-    if (!lastExpenseSnapshot) {
-      sendBotReply('No hay ningún gasto reciente para deshacer 👍', MAIN_MENU_BUTTONS);
+    if (totalIngresos === 0 && totalGastos === 0) {
+      sendBotReply(
+        'Aún no hay movimientos. Registra tu primer ingreso 💵',
+        [
+          { id: 'sum_inc', label: '💵 Registrar ingreso', action: 'action_income_start' },
+          { id: 'sum_men', label: '☰ Menú', action: 'action_menu' }
+        ]
+      );
       return;
     }
 
-    const { expense, previousSaldo } = lastExpenseSnapshot;
-    setSaldoRealGastable(previousSaldo);
-    setExpensesToday((prev) => prev.filter((e) => e.id !== expense.id));
-    setExpensesWeekly((prev) => prev.filter((e) => e.id !== expense.id));
-    setLastExpenseSnapshot(null);
+    const expensesTodayList = expensesList.filter((e) => e.dayNumber === diaActual);
+    const todayStr = expensesTodayList.length > 0
+      ? expensesTodayList.map((e) => `• ${e.time} - ${e.description}: $${formatMoney(e.amount)} (${e.category})`).join('\n')
+      : 'Sin gastos registrados hoy.';
 
-    sendBotReply(
-      `Listo ↩️ Cancelé el gasto de $${formatMoney(expense.amount)} en ${expense.category}.\n\nTu saldo volvió a ser ${formatBalance(previousSaldo)}.`,
-      MAIN_MENU_BUTTONS
-    );
-  };
+    const totalAli = expensesList.filter((e) => e.category === 'Alimentación').reduce((s, e) => s + e.amount, 0);
+    const totalOci = expensesList.filter((e) => e.category === 'Ocio').reduce((s, e) => s + e.amount, 0);
+    const totalTra = expensesList.filter((e) => e.category === 'Transporte').reduce((s, e) => s + e.amount, 0);
+    const totalOtr = expensesList.filter((e) => e.category === 'Otros').reduce((s, e) => s + e.amount, 0);
 
-  // Simulación de nota de voz con opciones
-  const handleSelectVoiceOption = (option: typeof VOICE_SIMULATION_OPTIONS[0]) => {
-    setIsVoiceModalOpen(false);
-    const userTime = getFormattedTime();
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: 'voice_' + Date.now(),
-        sender: 'user',
-        text: `🎤 [Nota de voz: "${option.transcript}"]`,
-        time: userTime
-      }
-    ]);
-
-    setIsTyping(true);
-    setTimeout(() => {
-      setIsTyping(false);
-      executeRegisterExpense(option.amount, option.category, option.desc);
-    }, 900);
-  };
-
-  // Simulación de foto de recibo con opciones
-  const handleSelectPhotoOption = (option: typeof PHOTO_SIMULATION_OPTIONS[0]) => {
-    setIsPhotoModalOpen(false);
-    const userTime = getFormattedTime();
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: 'photo_' + Date.now(),
-        sender: 'user',
-        text: `📷 [Foto de recibo: ${option.merchant} - $${option.amount}]`,
-        time: userTime
-      }
-    ]);
-
-    setIsTyping(true);
-    setTimeout(() => {
-      setIsTyping(false);
-      executeRegisterExpense(option.amount, option.category, `Recibo ${option.merchant}`);
-    }, 900);
-  };
-
-  // ==========================================================================
-  // CAMBIO 2: FLUJO ¿PUEDO COMPRAR...? (CONSULTA RÁPIDA CON [$5] [$20] [$50])
-  // ==========================================================================
-  const evaluatePurchaseEnquiry = (amount: number, itemDesc: string = 'esta compra') => {
-    try {
-      const formattedAmount = formatMoney(amount);
-
-      if (saldoRealGastable > 0 && amount <= saldoRealGastable) {
-        const restanteEstimado = formatMoney(saldoRealGastable - amount);
-        const msg = `¡Sí puedes! 🟢\n\nSi compras ${itemDesc} por $${formattedAmount}, te quedarían $${restanteEstimado} de saldo gastable hoy. Esta consulta no descuenta nada.`;
-        sendBotReply(msg, [
-          { id: 'btn_buy_another', label: '🛍️ Consultar otra compra', action: 'action_can_i_buy' },
-          { id: 'btn_buy_reg', label: '➕ Registrarla ahora', action: 'action_register_custom', payload: { amount, desc: itemDesc } },
-          { id: 'btn_buy_menu', label: '☰ Menú', action: 'action_menu' }
-        ]);
-      } else {
-        // Con saldo negativo o insuficiente: avisa que quedaría más abajo del saldo actual, sin restar nada
-        const nuevoEstimado = Math.round((saldoRealGastable - amount) * 100) / 100;
-        const formattedNuevo = formatBalance(nuevoEstimado);
-        const msg = `Ojo 🟡 Si compras ${itemDesc} por $${formattedAmount}, quedarías en ${formattedNuevo}. Recuerda que esta consulta no resta nada: ¿qué prefieres?`;
-        sendBotReply(
-          msg,
-          [
-            { id: 'btn_pause_24', label: '⏳ Pausa de 24 h', action: 'action_vault_pause' },
-            { id: 'btn_vault', label: '🔒 Guardar en Bóveda Anti-Impulso', action: 'action_vault_save' },
-            { id: 'btn_buy_menu_neg', label: '☰ Menú', action: 'action_menu' }
-          ],
-          { isAmberAlert: true }
-        );
-      }
-      setFlowState('MENU');
-    } catch (e) {
-      console.error(e);
-      sendBotReply('No pude evaluar la compra 😅 ¿Quieres volver al menú?', MAIN_MENU_BUTTONS);
+    let bovedaLine = '';
+    if (bovedaConfig.configured && bovedaConfig.active) {
+      const pct = bovedaConfig.targetAmount > 0 
+        ? Math.min(100, Math.round((bovedaTotal / bovedaConfig.targetAmount) * 100))
+        : 0;
+      bovedaLine = `\n\n🔒 Bóveda (${bovedaConfig.reason || 'Meta'}): $${formatMoney(bovedaTotal)} / $${formatMoney(bovedaConfig.targetAmount)} (${pct}%)`;
     }
+
+    const summaryText = 
+      `📊 Resumen de tu semana\n\n` +
+      `💵 Ingresos totales: $${formatMoney(totalIngresos)}\n` +
+      `💰 Gastos totales: $${formatMoney(totalGastos)}\n\n` +
+      `📅 Gastos de hoy:\n${todayStr}\n\n` +
+      `🍽️ Alimentación: $${formatMoney(totalAli)}\n` +
+      `🎉 Ocio: $${formatMoney(totalOci)}\n` +
+      `🚌 Transporte: $${formatMoney(totalTra)}\n` +
+      `📦 Otros: $${formatMoney(totalOtr)}` +
+      bovedaLine;
+
+    sendBotReply(summaryText, [
+      { id: 'sum_reg', label: '➕ Registrar gasto', action: 'action_register' },
+      { id: 'sum_men2', label: '☰ Menú', action: 'action_menu' }
+    ]);
   };
 
   // ==========================================================================
-  // FLUJO 2B: NUDGE DE AHORRO (RETO)
+  // FINALIZAR DÍA (D1 & D4: PAUSAS 24H PRIMERO, SOBRANTE A BÓVEDA O REPARTO LIMPIO)
   // ==========================================================================
-  const triggerNudgeOcio80 = () => {
-    try {
-      const exactMsg = `⚠️ Ya usaste el 80% de tu presupuesto de ocio de la semana. Reto: evita otro gasto hoy y guarda $2 en tu fondo de imprevistos. ¿Te sumas? 💪`;
+  const handleStartEndDay = () => {
+    // Si hay compras en pausa de 24 horas, preguntar primero por ellas
+    if (pausedPurchases.length > 0) {
+      const firstPause = pausedPurchases[0];
+      setFlowState('AWAITING_PAUSED_DECISION');
       sendBotReply(
-        exactMsg,
+        `Tienes en pausa de 24 h: ${firstPause.item} ($${formatMoney(firstPause.amount)}). ¿Sigues queriendo comprarlo?`,
         [
-          { id: 'btn_nudge_yes', label: '💪 Me sumo', action: 'action_nudge_accept' },
-          { id: 'btn_nudge_no', label: '👋 Ahora no', action: 'action_nudge_decline' }
+          { id: 'p_buy_now', label: 'Comprar ahora', action: 'action_paused_buy_now', payload: firstPause },
+          { id: 'p_discard', label: 'Ya no lo quiero', action: 'action_paused_discard', payload: firstPause },
+          { id: 'p_keep', label: 'Dejarlo en pausa', action: 'action_paused_keep' }
+        ]
+      );
+      return;
+    }
+
+    proceedEndDayDialog();
+  };
+
+  const proceedEndDayDialog = () => {
+    const gastadoHoy = gastosHoy;
+    const quedaHoy = saldoDeHoy;
+
+    if (incomesList.length === 0 && expensesList.length === 0) {
+      sendBotReply(
+        'Aún no hay movimientos registrados hoy. ¿Avanzamos al día siguiente?',
+        [
+          { id: 'ed_advance', label: '🌙 Sí, avanzar', action: 'action_execute_close_day' },
+          { id: 'ed_stay', label: 'Seguir hoy', action: 'action_menu' }
+        ]
+      );
+      return;
+    }
+
+    if (quedaHoy > 0) {
+      sendBotReply(
+        `¿Cerramos el día? Gastaste $${formatMoney(gastadoHoy)} y te sobran $${formatMoney(quedaHoy)}.`,
+        [
+          { id: 'ed_repartir', label: '🌙 Cerrar día y repartir', action: 'action_execute_close_day' },
+          { id: 'ed_boveda', label: '🔒 Guardar sobrante en Bóveda', action: 'action_close_day_save_leftover_vault' },
+          { id: 'ed_stay', label: 'Seguir hoy', action: 'action_menu' }
+        ]
+      );
+    } else if (quedaHoy < 0) {
+      sendBotReply(
+        `¿Cerramos el día? Gastaste $${formatMoney(gastadoHoy)} y hoy estás en ${formatBalance(quedaHoy)} 💛 Lo repartiremos en los próximos días.`,
+        [
+          { id: 'ed_close_neg', label: '🌙 Sí, cerrar día', action: 'action_execute_close_day' },
+          { id: 'ed_stay', label: 'Seguir hoy', action: 'action_menu' }
         ],
         { isAmberAlert: true }
       );
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  // ==========================================================================
-  // FLUJO 3: RESUMEN SEMANAL (CON DETALLES DE LA BÓVEDA SI ESTÁ ACTIVA)
-  // ==========================================================================
-  const handleShowWeeklySummary = () => {
-    try {
-      const hasMovements = incomesWeekly.length > 0 || expensesWeekly.length > 0;
-
-      // Si no hay movimientos:
-      if (!hasMovements) {
-        sendBotReply(
-          'Aún no hay movimientos. Registra tu primer ingreso 💵',
-          [
-            { id: 'sum_inc_first', label: '💵 Registrar ingreso', action: 'action_income_start' },
-            { id: 'sum_menu', label: '☰ Menú', action: 'action_menu' }
-          ]
-        );
-        return;
-      }
-
-      // 1. Ingresos
-      const totalIngresos = incomesWeekly.reduce((sum, i) => sum + i.amount, 0);
-      const incomesList = incomesWeekly.length > 0
-        ? incomesWeekly.map((i) => `• +$${formatMoney(i.amount)} (${i.source || 'Ingreso'})`).join('\n')
-        : 'Sin ingresos registrados aún.';
-
-      // 2. Gastos de hoy
-      let todayList = '';
-      if (expensesToday.length === 0) {
-        todayList = 'Hoy aún no registras gastos.';
-      } else {
-        todayList = expensesToday
-          .map((e) => `• ${e.time} - ${e.description}: $${formatMoney(e.amount)} (${e.category})`)
-          .join('\n');
-      }
-
-      // 3. Gastos de la semana
-      const totalGastadoSemana = expensesWeekly.reduce((sum, e) => sum + e.amount, 0);
-
-      const totalAli = expensesWeekly
-        .filter((e) => e.category === 'Alimentación')
-        .reduce((sum, e) => sum + e.amount, 0);
-
-      const totalOci = expensesWeekly
-        .filter((e) => e.category === 'Ocio')
-        .reduce((sum, e) => sum + e.amount, 0);
-
-      const totalTra = expensesWeekly
-        .filter((e) => e.category === 'Transporte')
-        .reduce((sum, e) => sum + e.amount, 0);
-
-      const totalOtr = expensesWeekly
-        .filter((e) => e.category === 'Otros')
-        .reduce((sum, e) => sum + e.amount, 0);
-
-      const pctAli = totalGastadoSemana > 0 ? Math.round((totalAli / totalGastadoSemana) * 100) : 0;
-      const pctOci = totalGastadoSemana > 0 ? Math.round((totalOci / totalGastadoSemana) * 100) : 0;
-      const pctTra = totalGastadoSemana > 0 ? Math.round((totalTra / totalGastadoSemana) * 100) : 0;
-      const pctOtr = totalGastadoSemana > 0 ? Math.round((totalOtr / totalGastadoSemana) * 100) : 0;
-
-      // Meta de ahorro real con motivo, meta y plazo si el usuario la activó
-      let bovedaLine = '';
-      if (bovedaConfig.configured && bovedaConfig.percentage > 0) {
-        const motivoStr = bovedaConfig.reason || 'Bóveda';
-        const targetBoveda = bovedaConfig.targetAmount || 100;
-        const plazoStr = bovedaConfig.deadline || '3 meses';
-        const pctAhorro = Math.min(100, Math.round((bovedaTotal / targetBoveda) * 100));
-        const bloquesLlenos = Math.round(pctAhorro / 10);
-        const progressBar = '█'.repeat(bloquesLlenos) + '░'.repeat(Math.max(0, 10 - bloquesLlenos));
-        bovedaLine = `\n\n🔒 ${motivoStr}: $${formatMoney(bovedaTotal)} / $${formatMoney(targetBoveda)} (${pctAhorro}%)\n[${progressBar}]\n⏱️ Meta estimada: en ${plazoStr}`;
-      } else {
-        bovedaLine = `\n\n🔒 Bóveda: Inactiva (0% de ahorro)`;
-      }
-
-      const summaryText = 
-        `📊 Resumen de tu semana\n\n` +
-        `💵 Ingresos de la semana: $${formatMoney(totalIngresos)}\n${incomesList}\n\n` +
-        `📅 Gastos de hoy:\n${todayList}\n\n` +
-        `💰 Gastos totales: $${formatMoney(totalGastadoSemana)}\n` +
-        `🍽️ Alimentación: $${formatMoney(totalAli)}${totalGastadoSemana > 0 ? ` (${pctAli}%)` : ''}\n` +
-        `🎉 Ocio: $${formatMoney(totalOci)}${totalGastadoSemana > 0 ? ` (${pctOci}%)` : ''}\n` +
-        `🚌 Transporte: $${formatMoney(totalTra)}${totalGastadoSemana > 0 ? ` (${pctTra}%)` : ''}\n` +
-        `📦 Otros: $${formatMoney(totalOtr)}${totalGastadoSemana > 0 ? ` (${pctOtr}%)` : ''}` +
-        bovedaLine;
-
-      sendBotReply(summaryText, [
-        { id: 'btn_sum_inc', label: '💵 Registrar ingreso', action: 'action_income_start' },
-        { id: 'btn_sum_reg', label: '➕ Registrar gasto', action: 'action_register' },
-        { id: 'btn_sum_menu', label: '☰ Menú', action: 'action_menu' }
-      ]);
-    } catch (e) {
-      console.error(e);
-      sendBotReply('Ocurrió un error al preparar el resumen 😅 ¿Volvemos al menú?', MAIN_MENU_BUTTONS);
-    }
-  };
-
-  // ==========================================================================
-  // CAMBIO 4: SOBRANTE DEL INGRESO DIARIO SE ACUMULA (FINALIZAR DÍA)
-  // ==========================================================================
-  const handleAskEndDay = () => {
-    try {
-      const gastadoHoy = expensesToday.reduce((sum, e) => sum + e.amount, 0);
-      const queda = saldoRealGastable;
-
-      setFlowState('CONFIRMING_CLOSE_DAY');
-
-      if (queda > 0) {
-        sendBotReply(
-          `¿Cerramos el día? Gastaste $${formatMoney(gastadoHoy)} y te quedan $${formatMoney(queda)} 🌙`,
-          [
-            { id: 'btn_rollover', label: '🔒 Pasar a mañana', action: 'action_rollover_leftover' },
-            { id: 'btn_send_vault', label: '🎯 Mandar a la bóveda', action: 'action_send_leftover_to_vault' },
-            { id: 'btn_close_yes', label: '✅ Sí, cerrar día', action: 'action_rollover_leftover' },
-            { id: 'btn_close_no', label: '☀️ Seguir hoy', action: 'action_menu' }
-          ]
-        );
-      } else if (queda < 0) {
-        sendBotReply(
-          `¿Cerramos el día? Gastaste $${formatMoney(gastadoHoy)} y estás en ${formatBalance(queda)} 🌙`,
-          [
-            { id: 'btn_close_yes', label: '✅ Sí, cerrar día', action: 'action_confirm_close_day' },
-            { id: 'btn_close_no', label: '☀️ Seguir hoy', action: 'action_menu' }
-          ]
-        );
-      } else {
-        sendBotReply(
-          `¿Cerramos el día? Gastaste $${formatMoney(gastadoHoy)} y cumpliste tu saldo de hoy 🌙`,
-          [
-            { id: 'btn_close_yes', label: '✅ Sí, cerrar día', action: 'action_confirm_close_day' },
-            { id: 'btn_close_no', label: '☀️ Seguir hoy', action: 'action_menu' }
-          ]
-        );
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  // Acumular el sobrante al saldo semanal y repartirlo en los días siguientes
-  const handleRolloverLeftover = () => {
-    const leftover = saldoRealGastable;
-    if (leftover <= 0) {
-      proceedCloseDay(leftover);
-      return;
-    }
-
-    const diasRestantes = Math.max(1, DIAS_SEMANA - diaActual);
-    const nuevoSemanal = Math.round((saldoSemanalAcumulado + leftover) * 100) / 100;
-    setSaldoSemanalAcumulado(nuevoSemanal);
-
-    let nuevoSaldoSiguienteDia = 0;
-    if (diaActual < DIAS_SEMANA) {
-      nuevoSaldoSiguienteDia = Math.round((nuevoSemanal / diasRestantes) * 100) / 100;
     } else {
-      // Si es el último día de la semana, pasa a la semana siguiente
-      nuevoSaldoSiguienteDia = Math.round((nuevoSemanal / DIAS_SEMANA) * 100) / 100;
-    }
-
-    sendBotReply(
-      `🎉 Te sobraron $${formatMoney(leftover)} hoy. Los sumé a tu saldo de la semana. Mañana puedes gastar $${formatMoney(nuevoSaldoSiguienteDia)}.`,
-      undefined,
-      { delayMs: 600 }
-    );
-
-    setTimeout(() => {
-      proceedCloseDay(leftover, true, nuevoSaldoSiguienteDia);
-    }, 1200);
-  };
-
-  // Mandar el sobrante a la Bóveda Anti-Impulso y cerrar día
-  const handleSendLeftoverToVault = () => {
-    const leftover = saldoRealGastable;
-    if (leftover <= 0) {
-      proceedCloseDay(leftover);
-      return;
-    }
-
-    const newBoveda = Math.round((bovedaTotal + leftover) * 100) / 100;
-    setBovedaTotal(newBoveda);
-    setAhorroActual(newBoveda);
-    setSaldoRealGastable(0);
-
-    sendBotReply(
-      `¡Genial! 🔒 Mandé $${formatMoney(leftover)} a tu Bóveda Anti-Impulso. Llevas $${formatMoney(newBoveda)} guardados.`,
-      undefined,
-      { delayMs: 600 }
-    );
-
-    setTimeout(() => {
-      proceedCloseDay(0, false, 0);
-    }, 1200);
-  };
-
-  const proceedCloseDay = (saldoSobrante: number, isRollover: boolean = false, precomputedNextSaldo?: number) => {
-    try {
-      const diasRestantes = Math.max(1, DIAS_SEMANA - diaActual);
-
-      let nuevoSaldoSiguienteDia = 0;
-      if (isRollover && precomputedNextSaldo !== undefined) {
-        nuevoSaldoSiguienteDia = precomputedNextSaldo;
-      } else {
-        const semanalTotalNeto = incomesWeekly
-          .filter((i) => i.timeframe === 'week')
-          .reduce((sum, i) => sum + (i.amount - i.bovedaAmount - i.fixedPayments), 0) + saldoSemanalAcumulado;
-        
-        const gastosSemanales = expensesWeekly.reduce((sum, e) => sum + e.amount, 0);
-        const plataRestanteSemana = semanalTotalNeto - gastosSemanales;
-
-        if (plataRestanteSemana !== 0 && diasRestantes > 0) {
-          nuevoSaldoSiguienteDia = Math.round((plataRestanteSemana / diasRestantes) * 100) / 100;
-        } else if (saldoSobrante !== 0) {
-          nuevoSaldoSiguienteDia = Math.round((saldoSobrante / diasRestantes) * 100) / 100;
-        }
-      }
-
-      setExpensesToday([]); // Limpia los gastos del día de hoy
-
-      // Si el día cerró en negativo: mensaje sin culpa repartiendo la diferencia
-      if (saldoSobrante < 0) {
-        sendBotReply(
-          'Hoy se gastó un poquito de más, ¡pasa! 💛 Lo reparto en los próximos días.',
-          undefined,
-          { isAmberAlert: true, delayMs: 400 }
-        );
-      }
-
-      const delayNextDay = (saldoSobrante < 0 || isRollover) ? 1200 : 800;
-
-      setTimeout(() => {
-        if (diaActual < DIAS_SEMANA) {
-          const proximoDia = diaActual + 1;
-          setDiaActual(proximoDia);
-          setSaldoRealGastable(nuevoSaldoSiguienteDia);
-
-          sendBotReply(
-            `Día ${proximoDia} iniciado ☀️ Tu saldo real gastable para hoy es de ${formatBalance(nuevoSaldoSiguienteDia)}`,
-            MAIN_MENU_BUTTONS,
-            { delayMs: 800 }
-          );
-        } else {
-          // Último día de la semana: si hubo sobrante pasa a la siguiente semana
-          const nuevaSemana = semanaActual + 1;
-          setSemanaActual(nuevaSemana);
-          setDiaActual(1);
-          setSaldoRealGastable(nuevoSaldoSiguienteDia);
-          setExpensesWeekly([]);
-          setIncomesWeekly([]);
-
-          sendBotReply(
-            `¡Completaste la semana! 🎉 Resumen semanal generado y archivado.\n\nSemana ${nuevaSemana} - Día 1 iniciado ☀️ Tu saldo para hoy es de ${formatBalance(nuevoSaldoSiguienteDia)}`,
-            MAIN_MENU_BUTTONS,
-            { delayMs: 800 }
-          );
-        }
-        setFlowState('MENU');
-      }, delayNextDay);
-    } catch (e) {
-      console.error(e);
-      sendBotReply('Reiniciando al menú principal 👍', MAIN_MENU_BUTTONS);
+      sendBotReply(
+        `¿Cerramos el día? Gastaste $${formatMoney(gastadoHoy)} y usaste justo tu saldo de hoy.`,
+        [
+          { id: 'ed_close_exact', label: '🌙 Sí, cerrar día', action: 'action_execute_close_day' },
+          { id: 'ed_stay', label: 'Seguir hoy', action: 'action_menu' }
+        ]
+      );
     }
   };
 
-  const handleConfirmCloseDay = () => {
-    if (saldoRealGastable > 0) {
-      handleRolloverLeftover();
-    } else {
-      proceedCloseDay(saldoRealGastable);
-    }
-  };
-
-  // ==========================================================================
-  // PANEL DE PRUEBAS DE EVALUADORES
-  // ==========================================================================
-  const loadScenarioIncomeTest = () => {
-    try {
-      setIsTestPanelOpen(false);
-      setIsMenuOpen(false);
-      finalizeIncomeRegistration({
-        amount: 120,
-        timeframe: 'week',
-        source: 'Trabajo',
-        fixedPayments: 0
-      });
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  const loadScenario2Data = () => {
-    try {
-      setIsTestPanelOpen(false);
-      setIsMenuOpen(false);
-      const mockOcioExpense: Expense = {
-        id: 'mock_ocio_80',
-        amount: 12,
-        category: 'Ocio',
-        description: 'Salida previa de ocio (80%)',
-        time: '11:00'
-      };
-      setExpensesWeekly((prev) => [mockOcioExpense, ...prev]);
+  // Guardar sobrante en Bóveda al cerrar día
+  const handleSaveLeftoverToVaultAndClose = () => {
+    const leftover = Math.max(0, saldoDeHoy);
+    if (leftover > 0) {
+      setExtraBovedaSemanal((prev) => Math.round((prev + leftover) * 100) / 100);
+      setBovedaTotal((prev) => Math.round((prev + leftover) * 100) / 100);
 
       sendBotReply(
-        '⚡ [Escenario 2 cargado]: Gasto de ocio al 80% ($12/$15). Lanzando nudge...',
+        `¡Genial! 🔒 Guardé $${formatMoney(leftover)} en tu Bóveda Anti-Impulso.`,
         undefined,
         { delayMs: 400 }
       );
-
-      setTimeout(() => {
-        triggerNudgeOcio80();
-      }, 1000);
-    } catch (e) {
-      console.error(e);
     }
+
+    setTimeout(() => {
+      executeCloseDayLogic(leftover);
+    }, 900);
   };
 
-  const loadScenario3Data = () => {
-    try {
-      setIsTestPanelOpen(false);
-      setIsMenuOpen(false);
+  // Ejecutar el avance de día o semana
+  const executeCloseDayLogic = (extraVaultSaved: number = 0) => {
+    setHasTriggered80Today(false);
 
-      const mockIncome: Income = {
-        id: 'inc_mock_3',
-        amount: 120,
-        timeframe: 'week',
-        source: 'Trabajo',
-        fixedPayments: 0,
-        bovedaAmount: 24,
-        dailyAdded: 13.71,
-        time: '09:00'
-      };
-      const mockExpenses: Expense[] = [
-        { id: 'm1', amount: 26, category: 'Alimentación', description: 'Supermercado y comida', time: '13:00' },
-        { id: 'm2', amount: 9, category: 'Ocio', description: 'Cine y café', time: '16:30' },
-        { id: 'm3', amount: 5, category: 'Transporte', description: 'Uber', time: '18:15' },
-        { id: 'm4', amount: 5, category: 'Otros', description: 'Farmacia', time: '19:40' }
-      ];
+    if (diaActual < 7) {
+      const proximoDia = diaActual + 1;
+      setDiaActual(proximoDia);
 
-      setIncomesWeekly([mockIncome]);
-      setExpensesWeekly(mockExpenses);
-      setBovedaTotal(24);
-      setAhorroActual(24);
+      // Calcular el nuevo saldo para mañana según la fórmula D1:
+      // Saldo de mañana = (ingresos de la semana − bóveda − fijos − gastos de días anteriores hasta hoy) ÷ días que quedan
+      const diasRestantesManana = 7 - proximoDia + 1;
+      const gastosHastaHoy = expensesList.reduce((s, e) => s + e.amount, 0);
+      const bovedaActualizada = bovedaDeLaSemana + extraVaultSaved;
+      const fondoRestanteManana = ingresosDeLaSemana - bovedaActualizada - fijosDeLaSemana - gastosHastaHoy;
+      const saldoManana = Math.round((fondoRestanteManana / diasRestantesManana) * 100) / 100;
 
-      sendBotReply('⚡ [Datos de prueba cargados]: Ingreso $120 y gastos de la semana. Generando resumen...', undefined, { delayMs: 400 });
+      sendBotReply(
+        `Día ${proximoDia} iniciado ☀️ Tu saldo de hoy es ${formatBalance(saldoManana)}.`,
+        MAIN_MENU_BUTTONS,
+        { delayMs: 800 }
+      );
+    } else {
+      // Fin de la semana (Día 7 cerrado)
+      const nuevaSemana = semanaActual + 1;
+      setSemanaActual(nuevaSemana);
+      setDiaActual(1);
+      setExpensesList([]);
+      setIncomesList([]);
+      setExtraBovedaSemanal(0);
 
-      setTimeout(() => {
-        handleShowWeeklySummary();
-      }, 1000);
-    } catch (e) {
-      console.error(e);
+      sendBotReply(
+        `¡Completaste la semana! 🎉 Resumen archivado.\n\nSemana ${nuevaSemana} - Día 1 iniciado ☀️ Tu saldo de hoy es $0. Registra tu nuevo ingreso para comenzar.`,
+        [
+          { id: 'w_new_inc', label: '💵 Registrar ingreso', action: 'action_income_start' },
+          { id: 'w_new_men', label: '☰ Menú', action: 'action_menu' }
+        ],
+        { delayMs: 800 }
+      );
     }
   };
 
   // ==========================================================================
-  // MANEJADOR CENTRAL DE CLIC EN BOTONES DE RESPUESTA RÁPIDA
+  // MANEJADOR CENTRAL DE CLICS EN BOTONES (D3: SOLO EL ÚLTIMO ES CLICKEABLE)
   // ==========================================================================
   const handleQuickReplyClick = (msgId: string, reply: { id: string; label: string; action: string; payload?: any }) => {
-    try {
-      // 1. Desactivar visualmente los botones de este mensaje
-      setMessages((prev) =>
-        prev.map((m) => (m.id === msgId ? { ...m, selectedReplyId: reply.id } : m))
-      );
+    // Marcar como seleccionado
+    setMessages((prev) =>
+      prev.map((m) => (m.id === msgId ? { ...m, selectedReplyId: reply.id } : m))
+    );
 
-      const userTime = getFormattedTime();
-
-      // 2. Reflejar la respuesta elegida en el chat
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: 'user_click_' + Date.now(),
-          sender: 'user',
-          text: reply.label,
-          time: userTime
-        }
-      ]);
-
-      // 3. Ejecutar acción
-      switch (reply.action) {
-        case 'action_income_start':
-          startIncomeFlow();
-          break;
-
-        case 'action_income_sample_amount':
-          if (reply.payload) {
-            handleIncomeAmountEntered(reply.payload);
-          }
-          break;
-
-        case 'action_income_custom_amount_prompt':
-          setFlowState('AWAITING_INCOME_AMOUNT');
-          sendBotReply(
-            'Escribe cuánto recibiste en el campo de texto 👇 (por ejemplo: "Me pagaron $120")',
-            [
-              { id: 'inc_back_to_chips', label: '⬅️ Atrás', action: 'action_income_start' }
-            ]
-          );
-          break;
-
-        case 'action_income_timeframe':
-          if (reply.payload) {
-            handleIncomeTimeframeChosen(reply.payload);
-          }
-          break;
-
-        case 'action_income_source':
-          if (reply.payload) {
-            handleIncomeSourceChosen(reply.payload);
-          }
-          break;
-
-        case 'action_income_custom_source_prompt':
-          setFlowState('AWAITING_INCOME_CUSTOM_SOURCE');
-          sendBotReply(
-            'Escribe de dónde viene esta plata en una palabra o frase corta ✍️ (ej: Freelance o Beca):',
-            [
-              { id: 'skip_custom_src', label: '⏩ Omitir', action: 'action_income_source', payload: 'Ingreso' },
-              { id: 'back_custom_src', label: '⬅️ Atrás', action: 'action_income_back_to_timeframe' }
-            ]
-          );
-          break;
-
-        case 'action_income_fixed_prompt':
-          setFlowState('AWAITING_INCOME_FIXED_AMOUNT');
-          sendBotReply(
-            '¿Cuánto suman tus pagos fijos de esta semana? 💳 Escribe el valor:',
-            [
-              { id: 'fix_50', label: '💳 $50', action: 'action_income_finalize_with_fixed', payload: 50 },
-              { id: 'fix_100', label: '💳 $100', action: 'action_income_finalize_with_fixed', payload: 100 },
-              { id: 'fix_skip_amt', label: '⏩ Omitir', action: 'action_income_finalize_with_fixed', payload: 0 },
-              { id: 'fix_back_amt', label: '⬅️ Atrás', action: 'action_income_back_to_source' }
-            ]
-          );
-          break;
-
-        case 'action_income_finalize_with_fixed':
-          finalizeIncomeRegistration({
-            amount: pendingIncomeData?.amount || 0,
-            timeframe: pendingIncomeData?.timeframe || 'week',
-            source: pendingIncomeData?.source || 'Ingreso',
-            fixedPayments: reply.payload !== undefined ? reply.payload : 0
-          });
-          break;
-
-        case 'action_income_undo':
-          handleUndoIncome();
-          break;
-
-        case 'action_income_edit_amount':
-          handleStartCorrectIncomeAmount();
-          break;
-
-        case 'action_income_back_to_timeframe':
-          if (pendingIncomeData?.amount) {
-            handleIncomeAmountEntered(pendingIncomeData.amount);
-          } else {
-            startIncomeFlow();
-          }
-          break;
-
-        case 'action_income_back_to_source':
-          if (pendingIncomeData?.timeframe) {
-            handleIncomeTimeframeChosen(pendingIncomeData.timeframe);
-          } else {
-            startIncomeFlow();
-          }
-          break;
-
-        // BÓVEDA CONFIGURABLE (PREGUNTAR ANTES SI QUIERE AHORRAR)
-        case 'action_boveda_start':
-          startBovedaFlow('menu');
-          break;
-
-        case 'action_boveda_yes':
-          handleBovedaDecisionYes();
-          break;
-
-        case 'action_boveda_no':
-          handleBovedaDecisionNo();
-          break;
-
-        case 'action_boveda_back_to_decision':
-          startBovedaFlow(pendingBovedaData?.sourceFlow || 'menu');
-          break;
-
-        case 'action_boveda_amount':
-          if (reply.payload) {
-            handleBovedaAmountChosen(reply.payload);
-          }
-          break;
-
-        case 'action_boveda_amount_prompt':
-          setFlowState('BOVEDA_CUSTOM_AMOUNT');
-          sendBotReply(
-            'Escribe el monto total que quieres ahorrar en números 🎯 (ej: $150):',
-            [
-              { id: 'b_back_amt_p', label: '⬅️ Atrás', action: 'action_boveda_yes' }
-            ]
-          );
-          break;
-
-        case 'action_boveda_reason':
-          if (reply.payload) {
-            handleBovedaReasonChosen(reply.payload);
-          }
-          break;
-
-        case 'action_boveda_reason_prompt':
-          setFlowState('BOVEDA_CUSTOM_REASON');
-          sendBotReply(
-            'Escribe en una frase para qué es este ahorro 💬 (ej: Para comprar una laptop):',
-            [
-              { id: 'b_back_r_p', label: '⬅️ Atrás', action: 'action_boveda_back_to_amount' }
-            ]
-          );
-          break;
-
-        case 'action_boveda_deadline':
-          if (reply.payload) {
-            handleBovedaDeadlineChosen(reply.payload);
-          }
-          break;
-
-        case 'action_boveda_deadline_prompt':
-          setFlowState('BOVEDA_CUSTOM_DEADLINE');
-          sendBotReply(
-            'Escribe en cuánto tiempo quieres lograrlo ⏱️ (ej: 4 meses o a fin de año):',
-            [
-              { id: 'b_back_d_p', label: '⬅️ Atrás', action: 'action_boveda_back_to_reason' }
-            ]
-          );
-          break;
-
-        case 'action_boveda_percentage':
-          if (reply.payload !== undefined) {
-            finalizeBovedaConfiguration(reply.payload);
-          }
-          break;
-
-        case 'action_boveda_percentage_prompt':
-          setFlowState('BOVEDA_CUSTOM_PERCENTAGE');
-          sendBotReply(
-            'Escribe el porcentaje de tu dinero que quieres guardar 📊 (ej: 15% o 25%):',
-            [
-              { id: 'b_back_p_p', label: '⬅️ Atrás', action: 'action_boveda_back_to_deadline' }
-            ]
-          );
-          break;
-
-        case 'action_boveda_back_to_amount':
-          handleBovedaDecisionYes();
-          break;
-
-        case 'action_boveda_back_to_reason':
-          if (pendingBovedaData?.targetAmount) {
-            handleBovedaAmountChosen(pendingBovedaData.targetAmount);
-          } else {
-            handleBovedaDecisionYes();
-          }
-          break;
-
-        case 'action_boveda_back_to_deadline':
-          if (pendingBovedaData?.reason) {
-            handleBovedaReasonChosen(pendingBovedaData.reason);
-          } else {
-            handleBovedaDecisionYes();
-          }
-          break;
-
-        // GASTOS
-        case 'action_register':
-          setFlowState('MENU');
-          sendBotReply(
-            'Escribe lo que gastaste como hablas con un amigo 👇\n\n_Ejemplo: "Gasté $3 en empanadas" o "pagué 5 de taxi"_\nSi presionaste por error o te arrepientes, puedes volver:',
-            [
-              { id: 'eg_emp', label: '🥟 Gasté $3 en empanadas', action: 'action_sample_text', payload: 'Gasté $3 en empanadas' },
-              { id: 'eg_tax', label: '🚕 pagué 5 de taxi', action: 'action_sample_text', payload: 'pagué 5 de taxi' },
-              { id: 'eg_cin', label: '🍿 cine $8', action: 'action_sample_text', payload: 'cine $8' },
-              { id: 'eg_cancel', label: '🔙 Cancelar y no registrar', action: 'action_cancel_register' }
-            ]
-          );
-          break;
-
-        case 'action_cancel_register':
-          setFlowState('MENU');
-          setPendingExpenseData(null);
-          sendBotReply(
-            '¡Sin problema! No registramos ningún gasto nuevo 😊 ¿Qué quieres hacer ahora?',
-            MAIN_MENU_BUTTONS
-          );
-          break;
-
-        case 'action_balance':
-          {
-            const motivoStr = bovedaConfig.configured && bovedaConfig.reason ? bovedaConfig.reason : 'Bóveda';
-            const targetStr = formatMoney(bovedaConfig.configured ? bovedaConfig.targetAmount : 100);
-            const pctProgress = bovedaConfig.targetAmount > 0 
-              ? Math.min(100, Math.round((bovedaTotal / bovedaConfig.targetAmount) * 100))
-              : 0;
-            const bloquesLlenos = Math.round(pctProgress / 10);
-            const progressBar = '█'.repeat(bloquesLlenos) + '░'.repeat(Math.max(0, 10 - bloquesLlenos));
-            const plazoStr = bovedaConfig.configured && bovedaConfig.deadline ? bovedaConfig.deadline : '3 meses';
-
-            const bovedaSection = (bovedaConfig.configured && bovedaConfig.percentage > 0)
-              ? `\n🔒 ${motivoStr}: *$${formatMoney(bovedaTotal)}* / $${targetStr} (${pctProgress}%)\n[${progressBar}]\n⏱️ Meta estimada: en ${plazoStr}`
-              : `\n🔒 Bóveda: Inactiva (0% de ahorro)`;
-
-            if (saldoRealGastable < 0) {
-              sendBotReply(
-                `💰 Hoy estás en *${formatBalance(saldoRealGastable)}* 💛\n\n📅 Saldo de la semana: *$${formatMoney(saldoSemanalAcumulado)}*${bovedaSection}\n\nCuando registres un ingreso, primero cubrimos esto.`,
-                [
-                  { id: 'b_inc', label: '💵 Registrar ingreso', action: 'action_income_start' },
-                  { id: 'b_men', label: '⬅️ Menú', action: 'action_menu' }
-                ],
-                { isAmberAlert: true }
-              );
-            } else {
-              sendBotReply(
-                `💰 Tu saldo real gastable para hoy es de *$${formatMoney(saldoRealGastable)}*.\n\n📅 Saldo de la semana: *$${formatMoney(saldoSemanalAcumulado)}*${bovedaSection}\n\nEs tu dinero disponible libre de culpa para lo que queda del día 💚`,
-                [
-                  { id: 'b_inc', label: '💵 Registrar ingreso', action: 'action_income_start' },
-                  { id: 'b_reg', label: '➕ Registrar gasto', action: 'action_register' },
-                  { id: 'b_buy', label: '🛍️ ¿Puedo comprar algo?', action: 'action_can_i_buy' },
-                  { id: 'b_bov', label: '🔒 Mi bóveda', action: 'action_boveda_start' },
-                  { id: 'b_men', label: '☰ Menú', action: 'action_menu' }
-                ]
-              );
-            }
-          }
-          break;
-
-        case 'action_can_i_buy':
-          setFlowState('AWAITING_PURCHASE_AMOUNT');
-          sendBotReply(
-            '¿De cuánto es la compra que estás pensando? 🛍️\n\nEscribe el monto o toca una opción rápida:',
-            [
-              { id: 'p_5', label: '$5', action: 'action_eval_buy', payload: { amount: 5, item: 'esta compra de $5' } },
-              { id: 'p_20', label: '$20', action: 'action_eval_buy', payload: { amount: 20, item: 'esta compra de $20' } },
-              { id: 'p_50', label: '$50', action: 'action_eval_buy', payload: { amount: 50, item: 'esta compra de $50' } },
-              { id: 'p_cancel', label: '⬅️ Atrás', action: 'action_menu' }
-            ]
-          );
-          break;
-
-        case 'action_summary':
-          handleShowWeeklySummary();
-          break;
-
-        case 'action_end_day':
-          handleAskEndDay();
-          break;
-
-        case 'action_rollover_leftover':
-          handleRolloverLeftover();
-          break;
-
-        case 'action_send_leftover_to_vault':
-          handleSendLeftoverToVault();
-          break;
-
-        case 'action_menu':
-          showMainMenuInChat();
-          break;
-
-        case 'action_undo_last':
-          handleUndoLastExpense();
-          break;
-
-        case 'action_sample_text':
-          if (reply.payload) {
-            handleUserSendRawText(reply.payload, true);
-          }
-          break;
-
-        case 'action_eval_buy':
-          if (reply.payload) {
-            evaluatePurchaseEnquiry(reply.payload.amount, reply.payload.item);
-          }
-          break;
-
-        case 'action_vault_pause':
-        case 'action_vault_save':
-          sendBotReply(
-            'Hecho 🔒 Te recuerdo mañana. Si lo sigues queriendo, lo planeamos juntos.',
-            [
-              { id: 'v_reg', label: '➕ Registrar gasto', action: 'action_register' },
-              { id: 'v_men', label: '☰ Menú', action: 'action_menu' }
-            ]
-          );
-          break;
-
-        case 'action_nudge_accept':
-          const nuevoBoveda = Math.round((bovedaTotal + 2) * 100) / 100;
-          setBovedaTotal(nuevoBoveda);
-          setAhorroActual(nuevoBoveda);
-          sendBotReply(
-            `🐷 ¡Buen trabajo! Guardé $2 en tu fondo de imprevistos. Llevas $${formatMoney(nuevoBoveda)} guardados esta semana.`,
-            [
-              { id: 'n_sal', label: '💰 Mi saldo de hoy', action: 'action_balance' },
-              { id: 'n_men', label: '☰ Menú', action: 'action_menu' }
-            ]
-          );
-          break;
-
-        case 'action_nudge_decline':
-          sendBotReply(
-            '¡Sin problema! Aquí estoy cuando lo necesites 😊',
-            MAIN_MENU_BUTTONS
-          );
-          break;
-
-        case 'action_confirm_close_day':
-          handleConfirmCloseDay();
-          break;
-
-        case 'action_select_amount':
-          if (reply.payload) {
-            executeRegisterExpense(reply.payload.amount, reply.payload.category, reply.payload.desc || 'Gasto registrado');
-          }
-          break;
-
-        case 'action_change_category':
-          if (reply.payload) {
-            executeRegisterExpense(reply.payload.amount, reply.payload.category, `Gasto de $${reply.payload.amount}`);
-          }
-          break;
-
-        case 'action_register_custom':
-          if (reply.payload) {
-            executeRegisterExpense(reply.payload.amount, 'Ocio', reply.payload.desc);
-          }
-          break;
-
-        default:
-          showMainMenuInChat();
-          break;
+    // Agregar mensaje del usuario en el chat
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: 'u_' + Date.now(),
+        sender: 'user',
+        text: reply.label,
+        time: getFormattedTime()
       }
-    } catch (e) {
-      console.error(e);
-      showMainMenuInChat();
+    ]);
+
+    switch (reply.action) {
+      case 'action_menu':
+        showMainMenu();
+        break;
+
+      case 'action_income_start':
+        startIncomeFlow();
+        break;
+
+      case 'action_income_amount_chosen':
+        if (reply.payload) handleIncomeAmountStep(reply.payload);
+        break;
+
+      case 'action_income_custom_amount':
+        setFlowState('AWAITING_INCOME_AMOUNT');
+        sendBotReply('Escribe cuánto recibiste en el campo de texto 👇 (ej: "Me pagaron 120"):');
+        break;
+
+      case 'action_income_timeframe':
+        if (reply.payload) handleIncomeTimeframeStep(reply.payload);
+        break;
+
+      case 'action_income_back_to_timeframe':
+        if (pendingIncome?.amount) handleIncomeAmountStep(pendingIncome.amount);
+        else startIncomeFlow();
+        break;
+
+      case 'action_income_fixed_chosen':
+        finalizeIncome(
+          pendingIncome?.amount || 0,
+          pendingIncome?.timeframe || 'week',
+          reply.payload || 0
+        );
+        break;
+
+      case 'action_income_custom_fixed':
+        setFlowState('AWAITING_INCOME_FIXED_AMOUNT');
+        sendBotReply('Escribe el monto total de tus pagos fijos de esta semana:');
+        break;
+
+      case 'action_undo_last_action':
+        handleUndoLastAction();
+        break;
+
+      case 'action_change_last_category':
+        if (reply.payload) {
+          sendBotReply('Elige la categoría correcta:', [
+            { id: 'c_ali', label: 'Alimentación', action: 'action_set_category', payload: { id: reply.payload, cat: 'Alimentación' } },
+            { id: 'c_oci', label: 'Ocio', action: 'action_set_category', payload: { id: reply.payload, cat: 'Ocio' } },
+            { id: 'c_tra', label: 'Transporte', action: 'action_set_category', payload: { id: reply.payload, cat: 'Transporte' } },
+            { id: 'c_otr', label: 'Otros', action: 'action_set_category', payload: { id: reply.payload, cat: 'Otros' } }
+          ]);
+        }
+        break;
+
+      case 'action_set_category':
+        if (reply.payload) {
+          handleChangeExpenseCategory(reply.payload.id, reply.payload.cat);
+        }
+        break;
+
+      // Bóveda
+      case 'action_boveda_accept_offer':
+        handleBovedaAskReason();
+        break;
+
+      case 'action_boveda_decline_offer':
+        setBovedaConfig({
+          configured: true,
+          active: false,
+          targetAmount: 0,
+          reason: '',
+          deadline: '',
+          percentage: 0
+        });
+        sendBotReply('¡Sin problema! Tu dinero queda 100% disponible para gastar 👍', MAIN_MENU_BUTTONS);
+        break;
+
+      case 'action_boveda_menu':
+        handleShowBovedaStatus();
+        break;
+
+      case 'action_boveda_start_setup':
+        handleBovedaAskReason();
+        break;
+
+      case 'action_boveda_pause_toggle':
+        setBovedaConfig((prev) => ({ ...prev, active: !prev.active }));
+        sendBotReply(
+          bovedaConfig.active ? 'Bóveda pausada. No apartaremos dinero de tus ingresos.' : 'Bóveda reactivada.',
+          MAIN_MENU_BUTTONS
+        );
+        break;
+
+      case 'action_boveda_reason_chosen':
+        if (reply.payload) handleBovedaAskAmount(reply.payload);
+        break;
+
+      case 'action_boveda_reason_custom':
+        setFlowState('BOVEDA_ASK_REASON');
+        sendBotReply('Escribe tu meta en una frase corta (ej: Comprar una laptop):');
+        break;
+
+      case 'action_boveda_amount_chosen':
+        if (reply.payload) handleBovedaAskDeadline(reply.payload);
+        break;
+
+      case 'action_boveda_amount_custom':
+        setFlowState('BOVEDA_ASK_AMOUNT');
+        sendBotReply('Escribe el monto total de tu meta en números (ej: 150):');
+        break;
+
+      case 'action_boveda_back_to_reason':
+        handleBovedaAskReason();
+        break;
+
+      case 'action_boveda_deadline_chosen':
+        if (reply.payload) {
+          handleBovedaProposal(reply.payload.deadline, reply.payload.months);
+        }
+        break;
+
+      case 'action_boveda_deadline_custom':
+        setFlowState('BOVEDA_ASK_DEADLINE');
+        sendBotReply('Escribe el plazo estimado (ej: 4 meses):');
+        break;
+
+      case 'action_boveda_back_to_amount':
+        if (pendingBovedaSetup?.reason) handleBovedaAskAmount(pendingBovedaSetup.reason);
+        else handleBovedaAskReason();
+        break;
+
+      case 'action_boveda_percentage_chosen':
+        if (reply.payload !== undefined) finalizeBovedaSetup(reply.payload);
+        break;
+
+      case 'action_boveda_percentage_custom':
+        setFlowState('BOVEDA_ASK_PERCENTAGE');
+        sendBotReply('Escribe el porcentaje que deseas guardar (ej: 12%):');
+        break;
+
+      case 'action_boveda_back_to_deadline':
+        if (pendingBovedaSetup?.targetAmount) handleBovedaAskDeadline(pendingBovedaSetup.targetAmount);
+        else handleBovedaAskReason();
+        break;
+
+      // Gastos
+      case 'action_register':
+        setFlowState('AWAITING_EXPENSE_INPUT');
+        sendBotReply(
+          'Escribe lo que gastaste como hablas con un amigo 👇\n\n_Ejemplos: "Gasté $3 en empanadas" o "pagué 5 de taxi"_',
+          [
+            { id: 'eg_emp', label: 'Gasté $3 en empanadas', action: 'action_sample_text', payload: 'Gasté $3 en empanadas' },
+            { id: 'eg_tax', label: 'Pagué 5 de taxi', action: 'action_sample_text', payload: 'Pagué 5 de taxi' },
+            { id: 'eg_cin', label: 'Cine $8', action: 'action_sample_text', payload: 'Cine $8' },
+            { id: 'eg_back', label: '⬅️ Atrás', action: 'action_menu' }
+          ]
+        );
+        break;
+
+      case 'action_sample_text':
+        if (reply.payload) handleUserSendRawText(reply.payload, true);
+        break;
+
+      case 'action_balance':
+        handleShowBalance();
+        break;
+
+      case 'action_can_i_buy':
+        setFlowState('AWAITING_PURCHASE_QUERY');
+        sendBotReply(
+          '¿De cuánto es la compra que estás pensando? 🛍️',
+          [
+            { id: 'cq_5', label: '$5', action: 'action_eval_buy_quick', payload: { amount: 5, item: 'esta compra' } },
+            { id: 'cq_20', label: '$20', action: 'action_eval_buy_quick', payload: { amount: 20, item: 'esta compra' } },
+            { id: 'cq_50', label: '$50', action: 'action_eval_buy_quick', payload: { amount: 50, item: 'esta compra' } },
+            { id: 'cq_back', label: '⬅️ Atrás', action: 'action_menu' }
+          ]
+        );
+        break;
+
+      case 'action_eval_buy_quick':
+        if (reply.payload) evaluatePurchase(reply.payload.amount, reply.payload.item);
+        break;
+
+      case 'action_register_purchase_now':
+        if (reply.payload) {
+          executeRegisterExpense(reply.payload.amount, 'Ocio', reply.payload.item);
+        }
+        break;
+
+      case 'action_pause_purchase_24h':
+        if (reply.payload) {
+          handleSavePausedPurchase(reply.payload.amount, reply.payload.item);
+        }
+        break;
+
+      case 'action_summary':
+        handleShowWeeklySummary();
+        break;
+
+      case 'action_end_day':
+        handleStartEndDay();
+        break;
+
+      case 'action_execute_close_day':
+        executeCloseDayLogic();
+        break;
+
+      case 'action_close_day_save_leftover_vault':
+        handleSaveLeftoverToVaultAndClose();
+        break;
+
+      case 'action_nudge_accept_2usd':
+        // El reto de $2 sale del saldo del usuario y entra a la bóveda
+        const transferNudge: Expense = {
+          id: 'nudge_save_' + Date.now(),
+          amount: 2,
+          category: 'Otros',
+          description: 'Reto de ahorro: $2 a Bóveda',
+          time: getFormattedTime(),
+          dayNumber: diaActual
+        };
+        setExpensesList((prev) => [transferNudge, ...prev]);
+        setBovedaTotal((prev) => Math.round((prev + 2) * 100) / 100);
+        sendBotReply(
+          `¡Gran trabajo! 🔒 Guardé $2 en tu Bóveda Anti-Impulso. Llevas $${formatMoney(bovedaTotal + 2)} acumulados.`,
+          MAIN_MENU_BUTTONS
+        );
+        break;
+
+      case 'action_nudge_decline':
+        sendBotReply('¡Sin problema! Aquí estoy cuando lo necesites.', MAIN_MENU_BUTTONS);
+        break;
+
+      // Pausas de 24h decisiones
+      case 'action_paused_buy_now':
+        if (reply.payload) {
+          setPausedPurchases((prev) => prev.filter((p) => p.id !== reply.payload.id));
+          executeRegisterExpense(reply.payload.amount, 'Ocio', reply.payload.item);
+          setTimeout(() => proceedEndDayDialog(), 1200);
+        }
+        break;
+
+      case 'action_paused_discard':
+        if (reply.payload) {
+          setPausedPurchases((prev) => prev.filter((p) => p.id !== reply.payload.id));
+          sendBotReply(`¡Frenaste un gasto impulsivo! 💪 Ese dinero sigue a salvo.`, undefined, { delayMs: 400 });
+          setTimeout(() => proceedEndDayDialog(), 1200);
+        }
+        break;
+
+      case 'action_paused_keep':
+        proceedEndDayDialog();
+        break;
+
+      default:
+        showMainMenu();
+        break;
     }
   };
 
@@ -1760,337 +1281,311 @@ export default function App() {
   // MANEJADOR PRINCIPAL DE TEXTO LIBRE DEL USUARIO
   // ==========================================================================
   const handleUserSendRawText = (rawTextToSend?: string, skipAddingUserMessage: boolean = false) => {
-    try {
-      const text = (rawTextToSend || inputText).trim();
-      if (!text || isTyping) return;
+    const text = (rawTextToSend || inputText).trim();
+    if (!text || isTyping) return;
 
-      const userTime = getFormattedTime();
+    if (!skipAddingUserMessage) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: 'u_' + Date.now(),
+          sender: 'user',
+          text,
+          time: getFormattedTime()
+        }
+      ]);
+    }
 
-      // 1. Agregar mensaje del usuario a la pantalla solo si no fue agregado ya por el botón
-      if (!skipAddingUserMessage) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: 'user_' + Date.now(),
-            sender: 'user',
-            text,
-            time: userTime
-          }
+    if (!rawTextToSend) setInputText('');
+    const cleanLower = text.toLowerCase().trim();
+
+    // 1. Detección global de solicitud de menú
+    if (['menú', 'menu', 'inicio', 'ayuda', 'opciones'].includes(cleanLower)) {
+      showMainMenu();
+      return;
+    }
+
+    // 2. Si el usuario escribe una frase de ingreso en cualquier pantalla (ej: "Me pagaron 120" o "Recibí 50")
+    const isIncomeExpression = /\b(me pagaron|recibí|recibi|ingreso|ingresaron|cobre|cobré|depósito|deposito|sueldo|pago de)\b/i.test(cleanLower);
+    if (isIncomeExpression) {
+      const { amount } = parseExpenseInput(text);
+      if (amount !== null && amount > 0) {
+        handleIncomeAmountStep(amount);
+      } else {
+        startIncomeFlow();
+      }
+      return;
+    }
+
+    // 3. Manejo contextual según el estado activo del bot
+    if (flowState === 'AWAITING_INCOME_AMOUNT') {
+      const { amount } = parseExpenseInput(text);
+      if (amount !== null && amount > 0) {
+        handleIncomeAmountStep(amount);
+      } else {
+        sendBotReply('¿Cuánto fue? 💵 Escribe solo el número (ej: 120):');
+      }
+      return;
+    }
+
+    if (flowState === 'AWAITING_INCOME_FIXED_AMOUNT') {
+      const { amount } = parseExpenseInput(text);
+      finalizeIncome(pendingIncome?.amount || 0, 'week', amount || 0);
+      return;
+    }
+
+    if (flowState === 'BOVEDA_OFFER_DECISION') {
+      if (['si', 'sí', 'sip', 'claro', 'quiero', 'dale'].includes(cleanLower)) {
+        handleBovedaAskReason();
+      } else {
+        setBovedaConfig({ configured: true, active: false, targetAmount: 0, reason: '', deadline: '', percentage: 0 });
+        sendBotReply('¡Listo! Tu dinero queda libre para gastar 👍', MAIN_MENU_BUTTONS);
+      }
+      return;
+    }
+
+    if (flowState === 'BOVEDA_ASK_REASON') {
+      handleBovedaAskAmount(text);
+      return;
+    }
+
+    if (flowState === 'BOVEDA_ASK_AMOUNT') {
+      const { amount } = parseExpenseInput(text);
+      if (amount !== null && amount > 0) {
+        handleBovedaAskDeadline(amount);
+      } else {
+        sendBotReply('Escribe el monto en números (ej: 100):');
+      }
+      return;
+    }
+
+    if (flowState === 'BOVEDA_ASK_DEADLINE') {
+      handleBovedaProposal(text, 3);
+      return;
+    }
+
+    if (flowState === 'BOVEDA_ASK_PERCENTAGE') {
+      const { amount } = parseExpenseInput(text);
+      finalizeBovedaSetup(amount || 10);
+      return;
+    }
+
+    if (flowState === 'AWAITING_PURCHASE_QUERY') {
+      const { amount } = parseExpenseInput(text);
+      if (amount !== null) {
+        evaluatePurchase(amount, 'esta compra');
+      } else {
+        sendBotReply('Escribe el monto de la compra que estás pensando (ej: 25):');
+      }
+      return;
+    }
+
+    // 4. Consulta directa de "¿Puedo comprar...?" desde cualquier punto
+    if (cleanLower.includes('puedo comprar') || cleanLower.includes('me alcanza') || cleanLower.includes('me compro')) {
+      const { amount } = parseExpenseInput(text);
+      // Extraer nombre del producto si fue escrito
+      const itemMatch = text.match(/(?:puedo comprar|me compro|me alcanza para)\s+(?:un|una|unos|unas|el|la|los|las)?\s*([a-zA-ZáéíóúÁÉÍÓÚñÑ\s]+?)(?:\s+(?:de|por|\$)\s*\d+|$)/i);
+      const extractedItem = itemMatch && itemMatch[1].trim().length > 1 ? itemMatch[1].trim() : 'esta compra';
+
+      if (amount !== null) {
+        evaluatePurchase(amount, extractedItem);
+      } else {
+        setFlowState('AWAITING_PURCHASE_QUERY');
+        sendBotReply(`¿De cuánto es ${extractedItem}? Escribe el monto o toca una opción:`, [
+          { id: 'cq_5_2', label: '$5', action: 'action_eval_buy_quick', payload: { amount: 5, item: extractedItem } },
+          { id: 'cq_20_2', label: '$20', action: 'action_eval_buy_quick', payload: { amount: 20, item: extractedItem } },
+          { id: 'cq_50_2', label: '$50', action: 'action_eval_buy_quick', payload: { amount: 50, item: extractedItem } },
+          { id: 'cq_back', label: '⬅️ Atrás', action: 'action_menu' }
         ]);
       }
+      return;
+    }
 
-      if (!rawTextToSend) setInputText('');
+    // 5. Palabras globales en estado MENU
+    if (['saldo', 'mi saldo', 'cuanto me queda', 'cuánto me queda'].includes(cleanLower)) {
+      handleShowBalance();
+      return;
+    }
 
-      const cleanLower = text.toLowerCase().trim();
+    if (['resumen', 'resumen semanal', 'semana'].includes(cleanLower)) {
+      handleShowWeeklySummary();
+      return;
+    }
 
-      // 2. Palabras globales que funcionan SIEMPRE
-      if (['menú', 'menu', 'inicio', 'ayuda', 'opciones'].includes(cleanLower)) {
-        showMainMenuInChat();
-        return;
+    if (['boveda', 'bóveda', 'mi boveda', 'mi bóveda'].includes(cleanLower)) {
+      handleShowBovedaStatus();
+      return;
+    }
+
+    // 6. Registro de gastos natural
+    const parsed = parseExpenseInput(text);
+
+    if (parsed.hasMultipleAmounts) {
+      sendBotReply('Vi más de un número en tu mensaje. ¿Cuál fue el monto del gasto?');
+      return;
+    }
+
+    // Caso A: Monto y categoría reconocidos
+    if (parsed.amount !== null && parsed.category !== null) {
+      executeRegisterExpense(parsed.amount, parsed.category, text, false);
+      return;
+    }
+
+    // Caso B: Solo monto detectado -> D6: Asignar a 'Otros' directamente con botón para cambiar categoría
+    if (parsed.amount !== null && parsed.category === null) {
+      executeRegisterExpense(parsed.amount, 'Otros', text, true);
+      return;
+    }
+
+    // Caso C: No se entendió el mensaje
+    sendBotReply(
+      'No te entendí bien. ¿Quieres registrar un gasto, ver tu saldo o registrar un ingreso?',
+      MAIN_MENU_BUTTONS
+    );
+  };
+
+  // ==========================================================================
+  // PANEL DE PRUEBAS DE EVALUADORES
+  // ==========================================================================
+  const loadScenario1Data = () => {
+    setIsTestPanelOpen(false);
+    setIsMenuOpen(false);
+    setDiaActual(1);
+    setExpensesList([]);
+    setIncomesList([
+      {
+        id: 'inc_test_120',
+        amount: 120,
+        timeframe: 'week',
+        source: 'Trabajo',
+        fixedPayments: 0,
+        bovedaAmount: 0,
+        dayAdded: 1,
+        time: '09:00'
       }
+    ]);
+    sendBotReply('⚡ [Escenario 1 cargado]: Ingreso de $120 para toda la semana. Tu saldo de hoy es $17.14.', MAIN_MENU_BUTTONS);
+  };
 
-      if (['saldo', 'mi saldo', 'cuanto me queda', 'cuánto me queda'].includes(cleanLower)) {
-        const motivoStr = bovedaConfig.configured && bovedaConfig.reason ? bovedaConfig.reason : 'Bóveda';
-        const targetStr = formatMoney(bovedaConfig.configured ? bovedaConfig.targetAmount : 100);
-
-        const bovedaSection = (bovedaConfig.configured && bovedaConfig.percentage > 0)
-          ? `\n🔒 ${motivoStr}: *$${formatMoney(bovedaTotal)}* / $${targetStr}`
-          : `\n🔒 Bóveda: Inactiva (0% de ahorro)`;
-
-        if (saldoRealGastable < 0) {
-          sendBotReply(
-            `💰 Hoy estás en *${formatBalance(saldoRealGastable)}* 💛\n\n📅 Saldo de la semana: *$${formatMoney(saldoSemanalAcumulado)}*${bovedaSection}\n\nCuando registres un ingreso, primero cubrimos esto.`,
-            [
-              { id: 'b_inc', label: '💵 Registrar ingreso', action: 'action_income_start' },
-              { id: 'b_men', label: '⬅️ Menú', action: 'action_menu' }
-            ],
-            { isAmberAlert: true }
-          );
-        } else {
-          sendBotReply(
-            `💰 Tu saldo real gastable para hoy es de *$${formatMoney(saldoRealGastable)}*.\n\n📅 Saldo de la semana: *$${formatMoney(saldoSemanalAcumulado)}*${bovedaSection}\n\nEs tu dinero disponible libre de culpa para lo que queda del día 💚`,
-            MAIN_MENU_BUTTONS
-          );
-        }
-        return;
+  const loadScenario2Data = () => {
+    setIsTestPanelOpen(false);
+    setIsMenuOpen(false);
+    setDiaActual(1);
+    setIncomesList([
+      {
+        id: 'inc_test_sc2',
+        amount: 120,
+        timeframe: 'week',
+        source: 'Trabajo',
+        fixedPayments: 0,
+        bovedaAmount: 0,
+        dayAdded: 1,
+        time: '09:00'
       }
+    ]);
+    // Gastos que superen el 80% de $17.14 (~$14 gastados)
+    const mockExpense: Expense = {
+      id: 'exp_sc2',
+      amount: 14,
+      category: 'Alimentación',
+      description: 'Almuerzo y compras',
+      time: '13:00',
+      dayNumber: 1
+    };
+    setExpensesList([mockExpense]);
+    setHasTriggered80Today(true);
 
-      if (['resumen', 'semana', 'resumen semanal'].includes(cleanLower)) {
-        handleShowWeeklySummary();
-        return;
-      }
-
-      if (['boveda', 'bóveda', 'mi boveda', 'mi bóveda', 'ahorro'].includes(cleanLower)) {
-        startBovedaFlow('menu');
-        return;
-      }
-
-      if (['ingreso', 'ingresos', 'registrar ingreso', 'recibí plata', 'me pagaron'].includes(cleanLower)) {
-        startIncomeFlow();
-        return;
-      }
-
-      if (['cancelar', 'atrás', 'atras'].includes(cleanLower)) {
-        showMainMenuInChat();
-        return;
-      }
-
-      // 3. Flujo de Decisión de Bóveda: ¿Quiere ahorrar o no?
-      if (flowState === 'BOVEDA_ASK_DECISION') {
-        if (['no', 'nop', 'no quiero', 'nada', 'omitir', 'despues', 'después', 'ahora no', 'cero'].includes(cleanLower)) {
-          handleBovedaDecisionNo();
-          return;
-        }
-        if (['si', 'sí', 'sip', 'claro', 'dale', 'quiero', 'quiero ahorrar'].includes(cleanLower)) {
-          handleBovedaDecisionYes();
-          return;
-        }
-        // Si escribe un número directo: se toma como monto y avanza
-        const { amount } = parseExpenseInput(text);
-        if (amount !== null && amount > 0) {
-          handleBovedaAmountChosen(amount);
-          return;
-        }
-        sendBotReply(
-          '¿Quieres apartar un ahorro en tu Bóveda Anti-Impulso? 🔒',
-          [
-            { id: 'bov_yes_p', label: '✅ Sí, quiero ahorrar', action: 'action_boveda_yes' },
-            { id: 'bov_no_p', label: '❌ No quiero ahorrar', action: 'action_boveda_no' },
-            { id: 'bov_back_p', label: '⬅️ Atrás', action: 'action_menu' }
-          ]
-        );
-        return;
-      }
-
-      // 4. Flujo de Bóveda: esperando respuestas escritas
-      if (flowState === 'BOVEDA_ASK_AMOUNT' || flowState === 'BOVEDA_CUSTOM_AMOUNT') {
-        const { amount } = parseExpenseInput(text);
-        if (amount !== null && amount > 0) {
-          handleBovedaAmountChosen(amount);
-        } else {
-          sendBotReply('¿Cuánto quieres ahorrar en total? 🎯 Escribe solo el monto o toca una opción:', [
-            { id: 'bov_50', label: '🎯 $50', action: 'action_boveda_amount', payload: 50 },
-            { id: 'bov_100', label: '🎯 $100', action: 'action_boveda_amount', payload: 100 },
-            { id: 'bov_200', label: '🎯 $200', action: 'action_boveda_amount', payload: 200 },
-            { id: 'bov_back', label: '⬅️ Atrás', action: 'action_boveda_yes' }
-          ]);
-        }
-        return;
-      }
-
-      if (flowState === 'BOVEDA_ASK_REASON' || flowState === 'BOVEDA_CUSTOM_REASON') {
-        handleBovedaReasonChosen(text);
-        return;
-      }
-
-      if (flowState === 'BOVEDA_ASK_DEADLINE' || flowState === 'BOVEDA_CUSTOM_DEADLINE') {
-        handleBovedaDeadlineChosen(text);
-        return;
-      }
-
-      if (flowState === 'BOVEDA_ASK_PERCENTAGE' || flowState === 'BOVEDA_CUSTOM_PERCENTAGE') {
-        const { amount } = parseExpenseInput(text);
-        const pct = amount !== null && amount >= 0 && amount <= 100 ? amount : 20;
-        finalizeBovedaConfiguration(pct);
-        return;
-      }
-
-      // 5. Flujo de Ingresos: esperando monto
-      if (flowState === 'AWAITING_INCOME_AMOUNT') {
-        const { amount } = parseExpenseInput(text);
-        if (amount !== null && amount > 0) {
-          handleIncomeAmountEntered(amount);
-          return;
-        } else {
-          sendBotReply('¿Cuánto fue? 💬 Escribe solo el número o por ejemplo: "120"', [
-            { id: 'inc_100_s', label: '💵 Me pagaron $100', action: 'action_income_sample_amount', payload: 100 },
-            { id: 'inc_50_s', label: '💵 Recibí $50', action: 'action_income_sample_amount', payload: 50 },
-            { id: 'inc_20_s', label: '💵 Recibí $20', action: 'action_income_sample_amount', payload: 20 },
-            { id: 'inc_back', label: '⬅️ Atrás', action: 'action_menu' }
-          ]);
-          return;
-        }
-      }
-
-      // 6. Flujo de Ingresos: esperando origen personalizado
-      if (flowState === 'AWAITING_INCOME_CUSTOM_SOURCE') {
-        handleIncomeSourceChosen(text);
-        return;
-      }
-
-      // 7. Flujo de Ingresos: esperando monto de pagos fijos
-      if (flowState === 'AWAITING_INCOME_FIXED_AMOUNT') {
-        const { amount } = parseExpenseInput(text);
-        const fixedAmt = amount !== null ? amount : 0;
-        finalizeIncomeRegistration({
-          amount: pendingIncomeData?.amount || 0,
-          timeframe: pendingIncomeData?.timeframe || 'week',
-          source: pendingIncomeData?.source || 'Ingreso',
-          fixedPayments: fixedAmt
-        });
-        return;
-      }
-
-      // 8. Manejo según estado activo: ¿Esperando monto para compra?
-      if (flowState === 'AWAITING_PURCHASE_AMOUNT') {
-        const { amount } = parseExpenseInput(text);
-        if (amount !== null) {
-          evaluatePurchaseEnquiry(amount, 'esta compra');
-          return;
-        }
-      }
-
-      // 9. Manejo según estado activo: ¿Esperando monto de gasto pendiente?
-      if (flowState === 'AWAITING_AMOUNT' && pendingExpenseData?.category) {
-        const { amount } = parseExpenseInput(text);
-        if (amount !== null) {
-          executeRegisterExpense(amount, pendingExpenseData.category, pendingExpenseData.desc || 'Gasto');
-          return;
-        }
-      }
-
-      // 10. Consulta directa de compra (ej: "¿Puedo comprar estas zapatillas de $80?")
-      if (cleanLower.includes('puedo comprar') || cleanLower.includes('me compro') || cleanLower.includes('alcanza para')) {
-        const { amount } = parseExpenseInput(text);
-        if (amount !== null) {
-          evaluatePurchaseEnquiry(amount, 'esas zapatillas');
-        } else {
-          setFlowState('AWAITING_PURCHASE_AMOUNT');
-          sendBotReply('¿De cuánto es la compra que estás pensando? 🛍️ Escribe el monto o toca una opción rápida:', [
-            { id: 'b5', label: '$5', action: 'action_eval_buy', payload: { amount: 5, item: 'esta compra de $5' } },
-            { id: 'b20', label: '$20', action: 'action_eval_buy', payload: { amount: 20, item: 'esta compra de $20' } },
-            { id: 'b50', label: '$50', action: 'action_eval_buy', payload: { amount: 50, item: 'esta compra de $50' } },
-            { id: 'bcancel', label: '⬅️ Atrás', action: 'action_menu' }
-          ]);
-        }
-        return;
-      }
-
-      // 11. Procesar registro de gasto natural
-      const parsed = parseExpenseInput(text);
-
-      // Si hay varios montos en el mismo mensaje, preguntar cuál es el gasto
-      if (parsed.hasMultipleAmounts) {
-        sendBotReply(
-          'Vi más de un número en tu mensaje 🧐 ¿Cuál es el monto exacto del gasto?',
-          [
-            { id: 'm_cancel', label: '☰ Menú', action: 'action_menu' }
-          ]
-        );
-        return;
-      }
-
-      // Monto muy alto (> $500)
-      if (parsed.amount !== null && parsed.amount > 500) {
-        sendBotReply(
-          `¿Confirmas registrar un gasto de *$${parsed.amount}*? ⚠️ Es un monto bastante alto para tu registro diario.`,
-          [
-            { id: 'c_yes', label: '✅ Sí, registrar', action: 'action_select_amount', payload: { amount: parsed.amount, category: parsed.category || 'Otros', desc: text } },
-            { id: 'c_no', label: '❌ Corregir monto', action: 'action_register' }
-          ]
-        );
-        return;
-      }
-
-      // Caso A: Monto y categoría reconocidos
-      if (parsed.amount !== null && parsed.category !== null) {
-        executeRegisterExpense(parsed.amount, parsed.category, text);
-        return;
-      }
-
-      // Caso B: Falta el monto pero reconoció categoría
-      if (parsed.amount === null && parsed.category !== null) {
-        setFlowState('AWAITING_AMOUNT');
-        setPendingExpenseData({ category: parsed.category, desc: text });
-        sendBotReply(
-          '¿Cuánto fue? 💵 Toca un monto frecuente o escríbelo:',
-          [
-            { id: 'amt_2', label: '$2', action: 'action_select_amount', payload: { amount: 2, category: parsed.category, desc: text } },
-            { id: 'amt_5', label: '$5', action: 'action_select_amount', payload: { amount: 5, category: parsed.category, desc: text } },
-            { id: 'amt_10', label: '$10', action: 'action_select_amount', payload: { amount: 10, category: parsed.category, desc: text } },
-            { id: 'amt_cancel', label: '🔙 Cancelar y volver', action: 'action_cancel_register' }
-          ]
-        );
-        return;
-      }
-
-      // Caso C: Monto detectado pero falta categoría -> Asigna "Otros" y ofrece cambiar
-      if (parsed.amount !== null && parsed.category === null) {
-        setFlowState('AWAITING_CATEGORY');
-        const amt = parsed.amount;
-        sendBotReply(
-          `Detecté $${amt} 👍 Lo asigné a "Otros". ¿Quieres cambiar la categoría?`,
-          [
-            { id: 'c_ali', label: '🍽️ Alimentación', action: 'action_change_category', payload: { amount: amt, category: 'Alimentación' } },
-            { id: 'c_oci', label: '🎉 Ocio', action: 'action_change_category', payload: { amount: amt, category: 'Ocio' } },
-            { id: 'c_tra', label: '🚌 Transporte', action: 'action_change_category', payload: { amount: amt, category: 'Transporte' } },
-            { id: 'c_otr', label: '📦 Dejar en Otros', action: 'action_change_category', payload: { amount: amt, category: 'Otros' } }
-          ]
-        );
-        return;
-      }
-
-      // Caso D: Mensaje no entendido
+    sendBotReply('⚡ [Escenario 2 cargado]: Gasto del 80% del saldo de hoy ($14 / $17.14). Lanzando alerta...', undefined, { delayMs: 400 });
+    setTimeout(() => {
       sendBotReply(
-        'No te entendí bien 😅 ¿Quieres registrar un ingreso, un gasto, ver tu saldo o consultar una compra?',
-        MAIN_MENU_BUTTONS
+        '⚠️ Llevas gastado el 80% de tu saldo de hoy ($14 de $17.14). Reto: evita otro gasto y guarda $2 en tu Bóveda 🔒 ¿Te sumas?',
+        [
+          { id: 'n_yes', label: 'Me sumo ($2 a bóveda)', action: 'action_nudge_accept_2usd' },
+          { id: 'n_no', label: 'Ahora no', action: 'action_nudge_decline' }
+        ],
+        { isAmberAlert: true }
       );
-    } catch (err) {
-      console.error(err);
-      sendBotReply('Ups, algo no se entendió bien 😊 ¿Quieres volver al menú?', MAIN_MENU_BUTTONS);
-    }
+    }, 1000);
   };
 
-  // Reiniciar demo completa (arranca en cero)
-  const handleResetDemoCompletely = () => {
-    try {
-      setDiaActual(1);
-      setSemanaActual(1);
-      setSaldoRealGastable(0);
-      setSaldoSemanalAcumulado(0);
-      setBovedaTotal(0);
-      setAhorroActual(0);
-      setBovedaConfig({
-        configured: false,
-        targetAmount: 0,
-        reason: '',
-        deadline: '',
-        percentage: 0
-      });
-      setPendingBovedaData(null);
-      setPendingIncomeForBoveda(null);
-      setIncomesWeekly([]);
-      setExpensesToday([]);
-      setExpensesWeekly([]);
-      setHasAskedFixedPaymentsOnce(false);
-      setLastExpenseSnapshot(null);
-      setLastIncomeSnapshot(null);
-      setPendingExpenseData(null);
-      setPendingIncomeData(null);
-      setInputText('');
-      setIsTyping(false);
-      setMessages([]);
-      setIsMenuOpen(false);
-      setIsTestPanelOpen(false);
-      setFlowState('WELCOME');
-      setScreen('welcome');
-    } catch (e) {
-      console.error(e);
-    }
+  const loadScenario3Data = () => {
+    setIsTestPanelOpen(false);
+    setIsMenuOpen(false);
+    setDiaActual(3);
+    setBovedaConfig({
+      configured: true,
+      active: true,
+      targetAmount: 100,
+      reason: 'Emergencias',
+      deadline: '3 meses',
+      percentage: 20
+    });
+    setBovedaTotal(24);
+    setIncomesList([
+      {
+        id: 'inc_test_sc3',
+        amount: 120,
+        timeframe: 'week',
+        source: 'Trabajo',
+        fixedPayments: 0,
+        bovedaAmount: 24,
+        dayAdded: 1,
+        time: '09:00'
+      }
+    ]);
+    setExpensesList([
+      { id: 'm1', amount: 15, category: 'Alimentación', description: 'Supermercado', time: '13:00', dayNumber: 1 },
+      { id: 'm2', amount: 8, category: 'Ocio', description: 'Cine', time: '18:00', dayNumber: 2 },
+      { id: 'm3', amount: 5, category: 'Transporte', description: 'Uber', time: '10:00', dayNumber: 3 }
+    ]);
+
+    sendBotReply('⚡ [Escenario 3 cargado]: Día 3, $24 en Bóveda y gastos registrados. Mostrando resumen...', undefined, { delayMs: 400 });
+    setTimeout(() => {
+      handleShowWeeklySummary();
+    }, 900);
   };
+
+  const handleResetDemoCompletely = () => {
+    setDiaActual(1);
+    setSemanaActual(1);
+    setIncomesList([]);
+    setExpensesList([]);
+    setBovedaTotal(0);
+    setBovedaConfig({
+      configured: false,
+      active: false,
+      targetAmount: 0,
+      reason: '',
+      deadline: '',
+      percentage: 0
+    });
+    setPausedPurchases([]);
+    setHasTriggered80Today(false);
+    setLastAction(null);
+    setPendingIncome(null);
+    setPendingBovedaSetup(null);
+    setInputText('');
+    setIsTyping(false);
+    setMessages([]);
+    setIsMenuOpen(false);
+    setIsTestPanelOpen(false);
+    setFlowState('WELCOME');
+    setScreen('welcome');
+  };
+
+  // Buscar el ID del último mensaje del bot que tiene quickReplies
+  const lastBotMsgWithReplies = [...messages]
+    .reverse()
+    .find((m) => m.sender === 'bot' && m.quickReplies && m.quickReplies.length > 0);
+  const lastBotMsgWithRepliesId = lastBotMsgWithReplies?.id;
 
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center p-0 sm:p-4 font-sans select-none antialiased">
-      {/* Marco mobile-first centrado (máx. 420px como un smartphone) */}
       <div className="w-full max-w-[420px] h-screen sm:h-[740px] bg-[#efeae2] flex flex-col relative sm:rounded-3xl shadow-2xl sm:border sm:border-slate-800 overflow-hidden">
         
-        {/* ========================================================================= */}
         {/* PANTALLA DE BIENVENIDA */}
-        {/* ========================================================================= */}
         {screen === 'welcome' && (
           <div className="flex-1 flex flex-col justify-between p-6 bg-gradient-to-b from-[#075e54] via-[#008069] to-[#054c44] text-white relative">
-            
-            {/* Barra estética de estado del móvil */}
             <div className="flex items-center justify-between text-xs text-emerald-100 font-medium">
               <span>9:41</span>
               <div className="flex items-center gap-1.5">
@@ -2101,26 +1596,18 @@ export default function App() {
               </div>
             </div>
 
-            {/* Contenido central de bienvenida */}
             <div className="flex flex-col items-center text-center my-auto py-6">
-              <div className="relative mb-6">
-                <div className="w-24 h-24 rounded-full bg-white/10 backdrop-blur-md border-2 border-white/20 flex items-center justify-center shadow-xl">
-                  <span className="text-5xl" role="img" aria-label="FinBot">🤖</span>
-                </div>
-                <div className="absolute -bottom-1 -right-1 w-8 h-8 rounded-full bg-[#25d366] border-2 border-[#008069] flex items-center justify-center shadow-md">
-                  <Sparkles className="w-4 h-4 text-white" />
-                </div>
+              <div className="w-24 h-24 rounded-full bg-white/10 backdrop-blur-md border-2 border-white/20 flex items-center justify-center shadow-xl mb-6">
+                <span className="text-5xl" role="img" aria-label="FinBot">🤖</span>
               </div>
-
               <h1 className="text-3xl font-extrabold tracking-tight text-white mb-2">
                 FinBot
               </h1>
               <p className="text-emerald-100 text-base font-semibold max-w-[280px] leading-snug">
-                Tu saldo real gastable, directo en el chat
+                Tu saldo de hoy, directo en el chat
               </p>
             </div>
 
-            {/* Único botón grande: "Iniciar chat" */}
             <div className="w-full pb-6">
               <button
                 onClick={handleStartChat}
@@ -2133,13 +1620,11 @@ export default function App() {
           </div>
         )}
 
-        {/* ========================================================================= */}
-        {/* PANTALLA DE CHAT (WHATSAPP DE ALTA FIDELIDAD) */}
-        {/* ========================================================================= */}
+        {/* PANTALLA DE CHAT WHATSAPP */}
         {screen === 'chat' && (
           <div className="flex-1 flex flex-col h-full bg-[#efeae2] relative overflow-hidden">
             
-            {/* ENCABEZADO DE WHATSAPP (Verde oscuro, avatar 🤖, 'en línea', y botón '☰ Menú') */}
+            {/* ENCABEZADO */}
             <header className="bg-[#008069] text-white px-3 py-2.5 flex items-center justify-between shadow-md z-20 shrink-0">
               <div className="flex items-center gap-2">
                 <button 
@@ -2168,12 +1653,11 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Botón '☰ Menú' fijo en el encabezado */}
+              {/* Botón Menú fijo en el encabezado */}
               <div className="flex items-center gap-1.5">
                 <button
                   onClick={() => setIsMenuOpen(!isMenuOpen)}
                   className="min-h-[44px] px-3 py-2 rounded-xl bg-white/15 hover:bg-white/25 active:scale-95 text-white font-semibold text-xs flex items-center gap-1.5 transition-all cursor-pointer"
-                  title="Menú principal de FinBot"
                 >
                   <MenuIcon className="w-4 h-4" />
                   <span>Menú</span>
@@ -2182,14 +1666,14 @@ export default function App() {
                 <button
                   onClick={() => setIsTestPanelOpen(!isTestPanelOpen)}
                   className="min-h-[44px] p-2 rounded-xl bg-white/10 hover:bg-white/20 active:scale-95 text-emerald-100 transition-all cursor-pointer"
-                  title="Panel de pruebas de evaluadores"
+                  title="Panel de pruebas"
                 >
                   <Sliders className="w-4 h-4" />
                 </button>
               </div>
             </header>
 
-            {/* MENÚ DESPLEGABLE PRINCIPAL */}
+            {/* MENÚ DESPLEGABLE */}
             {isMenuOpen && (
               <div className="absolute top-[58px] left-0 right-0 z-30 bg-[#075e54] text-white p-4 shadow-xl border-b border-emerald-400/20 animate-in fade-in slide-in-from-top-2 duration-150">
                 <div className="flex items-center justify-between pb-2 border-b border-white/10 mb-3">
@@ -2232,7 +1716,7 @@ export default function App() {
               </div>
             )}
 
-            {/* PANEL DE PRUEBAS DE EVALUADORES */}
+            {/* PANEL DE PRUEBAS */}
             {isTestPanelOpen && (
               <div className="absolute top-[58px] left-0 right-0 z-30 bg-slate-900 text-white p-4 shadow-2xl border-b border-slate-700 animate-in fade-in slide-in-from-top-2 duration-150">
                 <div className="flex items-center justify-between pb-2 border-b border-slate-800 mb-3">
@@ -2249,59 +1733,18 @@ export default function App() {
 
                 <div className="space-y-2 text-xs">
                   <button
-                    onClick={() => {
-                      setIsTestPanelOpen(false);
-                      setIsMenuOpen(false);
-                      startBovedaFlow('menu');
-                    }}
-                    className="w-full min-h-[44px] px-3 py-2 rounded-xl bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/30 text-indigo-200 text-left font-semibold flex items-center justify-between cursor-pointer"
-                  >
-                    <span>🔒 Probar Configuración de Bóveda</span>
-                    <ChevronRight className="w-4 h-4" />
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      setIsTestPanelOpen(false);
-                      setIsMenuOpen(false);
-                      executeRegisterExpense(5, 'Alimentación', 'Empanada');
-                    }}
-                    className="w-full min-h-[44px] px-3 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/30 text-amber-200 text-left font-semibold flex items-center justify-between cursor-pointer"
-                  >
-                    <span>⚡ Probar gasto sin saldo ($5 → −$5)</span>
-                    <ChevronRight className="w-4 h-4" />
-                  </button>
-
-                  <button
-                    onClick={() => {
-                      setIsTestPanelOpen(false);
-                      setIsMenuOpen(false);
-                      finalizeIncomeRegistration({
-                        amount: 20,
-                        timeframe: 'today',
-                        source: 'Trabajo',
-                        fixedPayments: 0
-                      });
-                    }}
+                    onClick={loadScenario1Data}
                     className="w-full min-h-[44px] px-3 py-2 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/30 text-emerald-200 text-left font-semibold flex items-center justify-between cursor-pointer"
                   >
-                    <span>💵 Probar ingreso cubriendo negativo ($20)</span>
-                    <ChevronRight className="w-4 h-4" />
-                  </button>
-
-                  <button
-                    onClick={loadScenarioIncomeTest}
-                    className="w-full min-h-[44px] px-3 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/20 text-emerald-100 text-left font-semibold flex items-center justify-between cursor-pointer"
-                  >
-                    <span>💵 Probar Ingreso ($120 semanal)</span>
+                    <span>💵 Escenario 1: $120 semanal ($17.14 hoy)</span>
                     <ChevronRight className="w-4 h-4" />
                   </button>
 
                   <button
                     onClick={loadScenario2Data}
-                    className="w-full min-h-[44px] px-3 py-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/20 text-amber-200 text-left font-semibold flex items-center justify-between cursor-pointer"
+                    className="w-full min-h-[44px] px-3 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/30 text-amber-200 text-left font-semibold flex items-center justify-between cursor-pointer"
                   >
-                    <span>⚡ Cargar datos Escenario 2 (Ocio 80%)</span>
+                    <span>⚠️ Escenario 2: Alerta de gasto al 80%</span>
                     <ChevronRight className="w-4 h-4" />
                   </button>
 
@@ -2309,7 +1752,18 @@ export default function App() {
                     onClick={loadScenario3Data}
                     className="w-full min-h-[44px] px-3 py-2 rounded-xl bg-blue-500/20 hover:bg-blue-500/30 border border-blue-500/30 text-blue-200 text-left font-semibold flex items-center justify-between cursor-pointer"
                   >
-                    <span>📊 Cargar datos Escenario 3 (Ingresos + Gastos)</span>
+                    <span>📊 Escenario 3: Resumen con Bóveda activa</span>
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setIsTestPanelOpen(false);
+                      executeRegisterExpense(5, 'Alimentación', 'Empanada');
+                    }}
+                    className="w-full min-h-[44px] px-3 py-2 rounded-xl bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/30 text-purple-200 text-left font-semibold flex items-center justify-between cursor-pointer"
+                  >
+                    <span>⚡ Probar gasto sin saldo ($5 → −$5)</span>
                     <ChevronRight className="w-4 h-4" />
                   </button>
 
@@ -2324,26 +1778,27 @@ export default function App() {
               </div>
             )}
 
-            {/* ÁREA DE MENSAJES (Burbujas, hora, doble check azul y scroll) */}
+            {/* ÁREA DE MENSAJES */}
             <div 
-              className="flex-1 overflow-y-auto p-3 space-y-3 whatsapp-scroll"
+              className="flex-1 overflow-y-auto p-3 space-y-3"
               style={{
                 backgroundColor: '#efeae2',
                 backgroundImage: 'radial-gradient(#d1d7db 1px, transparent 1px)',
                 backgroundSize: '16px 16px'
               }}
             >
-              {/* Notificación de cifrado WhatsApp */}
+              {/* Notificación de cifrado */}
               <div className="flex justify-center my-1">
                 <div className="bg-[#ffeecd] border border-amber-200/60 text-amber-900 text-[10px] px-3 py-1 rounded-lg text-center shadow-2xs max-w-[300px]">
-                  🔒 Conversación privada · Saldo real gastable del día
+                  Conversación privada · FinBot
                 </div>
               </div>
 
-              {/* Lista de mensajes */}
               {messages.map((msg) => {
                 const isUser = msg.sender === 'user';
                 const isAmber = msg.isAmberAlert;
+                // D3: Solo los botones del ÚLTIMO mensaje con botones quedan activos
+                const isLatestWithReplies = msg.id === lastBotMsgWithRepliesId;
 
                 return (
                   <div
@@ -2355,13 +1810,12 @@ export default function App() {
                     <div
                       className={`rounded-2xl px-3.5 py-2.5 text-xs shadow-xs relative leading-relaxed ${
                         isUser
-                          ? 'bg-[#d9fdd3] text-slate-900 rounded-tr-xs' // Verde claro usuario
+                          ? 'bg-[#d9fdd3] text-slate-900 rounded-tr-xs'
                           : isAmber
-                          ? 'bg-[#fffbeb] border border-amber-300 text-amber-950 rounded-tl-xs' // Alerta ámbar sin rojo
-                          : 'bg-white text-slate-900 rounded-tl-xs'      // Blanco bot
+                          ? 'bg-[#fffbeb] border border-amber-300 text-amber-950 rounded-tl-xs'
+                          : 'bg-white text-slate-900 rounded-tl-xs'
                       }`}
                     >
-                      {/* Texto del mensaje con formato limpio */}
                       <div className="whitespace-pre-line text-[13px] leading-relaxed">
                         {msg.text.split('\n').map((line, lIdx) => (
                           <React.Fragment key={lIdx}>
@@ -2387,19 +1841,19 @@ export default function App() {
                         ))}
                       </div>
 
-                      {/* Hora y doble check azul */}
                       <div className="flex items-center justify-end gap-1 text-[10px] text-slate-400 mt-1 float-right ml-2 select-none">
                         <span>{msg.time}</span>
                         {isUser && <CheckCheck className="w-3.5 h-3.5 text-[#53bdeb] inline" />}
                       </div>
                     </div>
 
-                    {/* Botones de respuesta rápida (1 por fila, emoji único al inicio, táctiles >= 44px) */}
+                    {/* Botones de respuesta rápida */}
                     {msg.quickReplies && msg.quickReplies.length > 0 && (
                       <div className="w-full mt-2 space-y-1.5">
                         {msg.quickReplies.map((reply) => {
                           const isSelected = msg.selectedReplyId === reply.id;
-                          const isDisabled = msg.selectedReplyId !== undefined;
+                          // D3: Inactivo si este mensaje ya no es el último o ya fue seleccionado
+                          const isDisabled = !isLatestWithReplies || msg.selectedReplyId !== undefined;
 
                           return (
                             <button
@@ -2414,7 +1868,7 @@ export default function App() {
                                 isSelected
                                   ? 'bg-[#008069] text-white border border-[#00705c]'
                                   : isDisabled
-                                  ? 'bg-slate-200 text-slate-400 border border-slate-300 opacity-60 cursor-not-allowed'
+                                  ? 'bg-slate-200 text-slate-400 border border-slate-300 opacity-50 cursor-not-allowed pointer-events-none'
                                   : 'bg-white hover:bg-slate-50 text-[#008069] border border-slate-200 hover:border-[#008069] cursor-pointer'
                               }`}
                             >
@@ -2429,20 +1883,14 @@ export default function App() {
                 );
               })}
 
-              {/* Animación de "escribiendo..." de máx. 1 segundo */}
               {isTyping && (
                 <div className="flex flex-col items-start max-w-[85%] mr-auto animate-in fade-in duration-200">
                   <div className="bg-white rounded-2xl rounded-tl-xs px-4 py-2.5 shadow-xs flex items-center gap-1.5">
+                    <span className="text-sm mr-0.5">🤖</span>
                     <span className="text-[11px] text-slate-400 font-medium mr-1">FinBot</span>
                     <div className="w-2 h-2 rounded-full bg-slate-400 animate-bounce" />
-                    <div 
-                      className="w-2 h-2 rounded-full bg-slate-400 animate-bounce" 
-                      style={{ animationDelay: '150ms' }} 
-                    />
-                    <div 
-                      className="w-2 h-2 rounded-full bg-slate-400 animate-bounce" 
-                      style={{ animationDelay: '300ms' }} 
-                    />
+                    <div className="w-2 h-2 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+                    <div className="w-2 h-2 rounded-full bg-slate-400 animate-bounce" style={{ animationDelay: '300ms' }} />
                   </div>
                 </div>
               )}
@@ -2450,7 +1898,7 @@ export default function App() {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* MODAL / BOTTOM SHEET: OPCIONES PARA NOTA DE VOZ (🎤) */}
+            {/* MODAL NOTA DE VOZ */}
             {isVoiceModalOpen && (
               <div className="absolute inset-0 z-30 bg-black/50 backdrop-blur-xs flex flex-col justify-end animate-in fade-in duration-150">
                 <div className="bg-[#efeae2] border-t border-slate-300 rounded-t-3xl p-4 shadow-2xl max-h-[80%] flex flex-col">
@@ -2461,12 +1909,12 @@ export default function App() {
                       </div>
                       <div>
                         <h4 className="text-xs font-bold text-slate-900 leading-tight">Simular Nota de Voz</h4>
-                        <p className="text-[10px] text-slate-500">Elige un audio para registrar en 2 segundos:</p>
+                        <p className="text-[10px] text-slate-500">Toca un audio para registrar en 2 segundos:</p>
                       </div>
                     </div>
                     <button
                       onClick={() => setIsVoiceModalOpen(false)}
-                      className="p-1 rounded-full text-slate-500 hover:text-slate-800 hover:bg-slate-200 cursor-pointer"
+                      className="p-1 rounded-full text-slate-500 hover:text-slate-800 cursor-pointer"
                     >
                       <X className="w-4 h-4" />
                     </button>
@@ -2476,7 +1924,19 @@ export default function App() {
                     {VOICE_SIMULATION_OPTIONS.map((opt) => (
                       <button
                         key={opt.id}
-                        onClick={() => handleSelectVoiceOption(opt)}
+                        onClick={() => {
+                          setIsVoiceModalOpen(false);
+                          setMessages((prev) => [
+                            ...prev,
+                            {
+                              id: 'v_' + Date.now(),
+                              sender: 'user',
+                              text: `🎤 [Nota de voz: "${opt.transcript}"]`,
+                              time: getFormattedTime()
+                            }
+                          ]);
+                          executeRegisterExpense(opt.amount, opt.category, opt.desc);
+                        }}
                         className="w-full min-h-[48px] p-2.5 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 hover:border-[#008069] text-left transition-all shadow-xs flex items-center justify-between gap-2 cursor-pointer active:scale-[0.99]"
                       >
                         <div className="flex items-center gap-2.5 truncate">
@@ -2505,7 +1965,7 @@ export default function App() {
               </div>
             )}
 
-            {/* MODAL / BOTTOM SHEET: OPCIONES PARA FOTO DE RECIBO (📷) */}
+            {/* MODAL FOTO DE RECIBO */}
             {isPhotoModalOpen && (
               <div className="absolute inset-0 z-30 bg-black/50 backdrop-blur-xs flex flex-col justify-end animate-in fade-in duration-150">
                 <div className="bg-[#efeae2] border-t border-slate-300 rounded-t-3xl p-4 shadow-2xl max-h-[80%] flex flex-col">
@@ -2516,12 +1976,12 @@ export default function App() {
                       </div>
                       <div>
                         <h4 className="text-xs font-bold text-slate-900 leading-tight">Simular Foto de Recibo</h4>
-                        <p className="text-[10px] text-slate-500">Elige un comprobante para escanear:</p>
+                        <p className="text-[10px] text-slate-500">Toca un comprobante para escanear:</p>
                       </div>
                     </div>
                     <button
                       onClick={() => setIsPhotoModalOpen(false)}
-                      className="p-1 rounded-full text-slate-500 hover:text-slate-800 hover:bg-slate-200 cursor-pointer"
+                      className="p-1 rounded-full text-slate-500 hover:text-slate-800 cursor-pointer"
                     >
                       <X className="w-4 h-4" />
                     </button>
@@ -2531,7 +1991,19 @@ export default function App() {
                     {PHOTO_SIMULATION_OPTIONS.map((opt) => (
                       <button
                         key={opt.id}
-                        onClick={() => handleSelectPhotoOption(opt)}
+                        onClick={() => {
+                          setIsPhotoModalOpen(false);
+                          setMessages((prev) => [
+                            ...prev,
+                            {
+                              id: 'p_' + Date.now(),
+                              sender: 'user',
+                              text: `📷 [Foto de recibo: ${opt.merchant} - $${opt.amount}]`,
+                              time: getFormattedTime()
+                            }
+                          ]);
+                          executeRegisterExpense(opt.amount, opt.category, opt.desc);
+                        }}
                         className="w-full min-h-[48px] p-2.5 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 hover:border-[#008069] text-left transition-all shadow-xs flex items-center justify-between gap-2 cursor-pointer active:scale-[0.99]"
                       >
                         <div className="flex items-center gap-2.5 truncate">
@@ -2560,14 +2032,14 @@ export default function App() {
               </div>
             )}
 
-            {/* BARRA INFERIOR DE WHATSAPP (Input con placeholder fantasma, 🎤 nota de voz y 📷 foto) */}
+            {/* BARRA INFERIOR DE INPUT */}
             <footer className="p-2 bg-[#f0f2f5] border-t border-slate-200 flex items-center gap-1.5 shrink-0 z-10">
               <button 
                 type="button" 
                 onClick={() => setIsPhotoModalOpen(true)}
                 disabled={isTyping}
                 className="min-w-[44px] min-h-[44px] rounded-full text-slate-600 hover:text-[#008069] hover:bg-slate-200/60 flex items-center justify-center transition-colors cursor-pointer disabled:opacity-50"
-                title="Elegir foto de recibo (📷)"
+                title="Elegir foto de recibo"
               >
                 <Camera className="w-5 h-5" />
               </button>
@@ -2577,12 +2049,11 @@ export default function App() {
                 onClick={() => setIsVoiceModalOpen(true)}
                 disabled={isTyping}
                 className="min-w-[44px] min-h-[44px] rounded-full text-slate-600 hover:text-[#008069] hover:bg-slate-200/60 flex items-center justify-center transition-colors cursor-pointer disabled:opacity-50"
-                title="Elegir nota de voz (🎤)"
+                title="Elegir nota de voz"
               >
                 <Mic className="w-5 h-5" />
               </button>
 
-              {/* Campo de texto con placeholder fantasma requerido */}
               <input
                 type="text"
                 value={inputText}
@@ -2590,7 +2061,7 @@ export default function App() {
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') handleUserSendRawText();
                 }}
-                placeholder="Ej: Gasté $3 en empanadas"
+                placeholder="Escribe un mensaje..."
                 disabled={isTyping}
                 className="flex-1 bg-white text-slate-900 placeholder-slate-400 text-xs rounded-xl px-3.5 py-2.5 border border-slate-200 focus:outline-hidden focus:ring-1 focus:ring-[#008069] min-h-[44px] disabled:bg-slate-100"
               />
