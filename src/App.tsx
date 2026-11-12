@@ -160,6 +160,30 @@ const cleanExpenseDescription = (rawText: string, detectedCategory: ExpenseCateg
   return detectedCategory;
 };
 
+// Parser de plazo en semanas reales para verificar viabilidad
+const parseDeadlineToWeeks = (deadlineStr: string): number => {
+  const clean = deadlineStr.toLowerCase().trim();
+  const numMatch = clean.match(/(\d+)/);
+  const num = numMatch ? parseInt(numMatch[1], 10) : null;
+
+  if (clean.includes('semana') || clean.includes('sem')) {
+    return num && num > 0 ? num : 1;
+  }
+  if (clean.includes('día') || clean.includes('dia')) {
+    return 1;
+  }
+  if (clean.includes('año') || clean.includes('ano')) {
+    return (num && num > 0 ? num : 1) * 52;
+  }
+  if (clean.includes('mes') || clean.includes('meses')) {
+    return (num && num > 0 ? num : 1) * 4;
+  }
+  if (num && num > 0) {
+    return num <= 4 ? num * 4 : num;
+  }
+  return 12; // 3 meses por defecto (~12 semanas)
+};
+
 // Parser robusto de montos y categorías
 const parseExpenseInput = (input: string) => {
   const clean = input.toLowerCase().trim();
@@ -534,44 +558,109 @@ export default function App() {
     sendBotReply(
       '¿En cuánto tiempo quieres lograrlo?',
       [
-        { id: 'bd_1m', label: '1 mes', action: 'action_boveda_deadline_chosen', payload: { deadline: '1 mes', months: 1 } },
-        { id: 'bd_3m', label: '3 meses', action: 'action_boveda_deadline_chosen', payload: { deadline: '3 meses', months: 3 } },
-        { id: 'bd_6m', label: '6 meses', action: 'action_boveda_deadline_chosen', payload: { deadline: '6 meses', months: 6 } },
+        { id: 'bd_1m', label: '1 mes', action: 'action_boveda_deadline_chosen', payload: { deadline: '1 mes', weeks: 4 } },
+        { id: 'bd_3m', label: '3 meses', action: 'action_boveda_deadline_chosen', payload: { deadline: '3 meses', weeks: 12 } },
+        { id: 'bd_6m', label: '6 meses', action: 'action_boveda_deadline_chosen', payload: { deadline: '6 meses', weeks: 24 } },
         { id: 'bd_otro', label: 'Otro plazo', action: 'action_boveda_deadline_custom' },
         { id: 'bd_back', label: '⬅️ Atrás', action: 'action_boveda_back_to_amount' }
       ]
     );
   };
 
-  const handleBovedaProposal = (deadlineStr: string, monthsCount: number) => {
-    const target = pendingBovedaSetup?.targetAmount || 100;
-    const weeks = Math.max(1, monthsCount * 4);
-    const aporteSemanalEstimado = Math.round((target / weeks) * 100) / 100;
-
-    // Calcular el porcentaje sugerido respecto al ingreso semanal (o base $100 si no hay aún)
-    const baseIngreso = ingresosDeLaSemana > 0 ? ingresosDeLaSemana : 100;
-    const suggestedPct = Math.min(30, Math.max(5, Math.round((aporteSemanalEstimado / baseIngreso) * 100)));
-
-    setPendingBovedaSetup((prev) => ({ ...prev, deadline: deadlineStr }));
-    setFlowState('BOVEDA_ASK_PERCENTAGE');
-
+  const handleBovedaAskLongerDeadline = () => {
+    setFlowState('BOVEDA_ASK_DEADLINE');
     sendBotReply(
-      `Para $${formatMoney(target)} en ${deadlineStr} necesitas ~$${formatMoney(aporteSemanalEstimado)} por semana (aprox. ${suggestedPct}% de tu ingreso). ¿Qué porcentaje apartamos de tus ingresos?`,
+      'Elige un plazo más realista para no quedarte sin dinero en la semana:',
       [
-        { id: 'bp_sug', label: `${suggestedPct}%`, action: 'action_boveda_percentage_chosen', payload: suggestedPct },
-        { id: 'bp_10', label: '10%', action: 'action_boveda_percentage_chosen', payload: 10 },
-        { id: 'bp_15', label: '15%', action: 'action_boveda_percentage_chosen', payload: 15 },
-        { id: 'bp_otro', label: 'Otro %', action: 'action_boveda_percentage_custom' },
-        { id: 'bp_back', label: '⬅️ Atrás', action: 'action_boveda_back_to_deadline' }
+        { id: 'bd_3m_l', label: '3 meses', action: 'action_boveda_deadline_chosen', payload: { deadline: '3 meses', weeks: 12 } },
+        { id: 'bd_6m_l', label: '6 meses', action: 'action_boveda_deadline_chosen', payload: { deadline: '6 meses', weeks: 24 } },
+        { id: 'bd_1y_l', label: '1 año', action: 'action_boveda_deadline_chosen', payload: { deadline: '1 año', weeks: 52 } },
+        { id: 'bd_ot_l', label: 'Otro plazo', action: 'action_boveda_deadline_custom' },
+        { id: 'bd_back_l', label: '⬅️ Atrás', action: 'action_boveda_back_to_amount' }
       ]
     );
   };
 
-  const finalizeBovedaSetup = (percentage: number) => {
+  const handleBovedaProposal = (deadlineStr: string, weeksCount?: number) => {
+    const target = pendingBovedaSetup?.targetAmount || 100;
+    const weeks = Math.max(1, weeksCount || parseDeadlineToWeeks(deadlineStr));
+    const aporteSemanalEstimado = Math.round((target / weeks) * 100) / 100;
+
+    const baseIngreso = ingresosDeLaSemana > 0 ? ingresosDeLaSemana : 100;
+
+    // VALIDACIÓN DE REALISMO: Imposible ahorrar más de lo que ingresa en la semana
+    if (ingresosDeLaSemana > 0 && aporteSemanalEstimado >= ingresosDeLaSemana) {
+      setPendingBovedaSetup((prev) => ({ ...prev, deadline: deadlineStr }));
+      setFlowState('BOVEDA_ASK_DEADLINE');
+
+      const semanasRealistasAl15 = Math.max(2, Math.ceil(target / (ingresosDeLaSemana * 0.15)));
+      const mesesRealistas = Math.ceil(semanasRealistasAl15 / 4);
+
+      sendBotReply(
+        `Ojo 🟡 Con esa meta de $${formatMoney(target)} en ${deadlineStr} tendrías que guardar $${formatMoney(aporteSemanalEstimado)} por semana, pero tu ingreso semanal es de $${formatMoney(ingresosDeLaSemana)}. ¡Es imposible ahorrar más de lo que tienes para vivir! Seamos realistas: prueba con más plazo o ajusta tu meta.`,
+        [
+          { id: 'bov_prop_real', label: `Proponer ${mesesRealistas} meses (~15%)`, action: 'action_boveda_accept_realistic_suggestion', payload: { deadline: `${mesesRealistas} meses`, pct: 15 } },
+          { id: 'bov_fix_dl', label: 'Elegir más plazo', action: 'action_boveda_ask_longer_deadline' },
+          { id: 'bov_fix_amt', label: 'Cambiar monto de meta', action: 'action_boveda_back_to_amount' },
+          { id: 'bov_fix_men', label: '⬅️ Menú', action: 'action_menu' }
+        ],
+        { isAmberAlert: true }
+      );
+      return;
+    }
+
+    const rawPct = Math.round((aporteSemanalEstimado / baseIngreso) * 100);
+    const suggestedPct = Math.min(30, Math.max(5, rawPct));
+
+    setPendingBovedaSetup((prev) => ({ ...prev, deadline: deadlineStr }));
+    setFlowState('BOVEDA_ASK_PERCENTAGE');
+
+    // Alerta moderada si supera el 40% del ingreso semanal
+    if (rawPct > 40 && ingresosDeLaSemana > 0) {
+      sendBotReply(
+        `Ojo 🟡 Para $${formatMoney(target)} en ${deadlineStr} necesitarías guardar $${formatMoney(aporteSemanalEstimado)} cada semana (${rawPct}% de tu plata). Guardar tanto te dejaría muy justo. Te sugiero un porcentaje más realista o darle más tiempo:`,
+        [
+          { id: 'bp_10', label: '10%', action: 'action_boveda_percentage_chosen', payload: 10 },
+          { id: 'bp_15', label: '15%', action: 'action_boveda_percentage_chosen', payload: 15 },
+          { id: 'bp_20', label: '20%', action: 'action_boveda_percentage_chosen', payload: 20 },
+          { id: 'bp_more_time', label: 'Dar más plazo', action: 'action_boveda_ask_longer_deadline' },
+          { id: 'bp_back', label: '⬅️ Atrás', action: 'action_boveda_back_to_deadline' }
+        ],
+        { isAmberAlert: true }
+      );
+    } else {
+      sendBotReply(
+        `Para $${formatMoney(target)} en ${deadlineStr} necesitas ~$${formatMoney(aporteSemanalEstimado)} por semana (aprox. ${suggestedPct}% de tu ingreso). ¿Qué porcentaje apartamos de tus ingresos?`,
+        [
+          { id: 'bp_sug', label: `${suggestedPct}%`, action: 'action_boveda_percentage_chosen', payload: suggestedPct },
+          { id: 'bp_10', label: '10%', action: 'action_boveda_percentage_chosen', payload: 10 },
+          { id: 'bp_15', label: '15%', action: 'action_boveda_percentage_chosen', payload: 15 },
+          { id: 'bp_otro', label: 'Otro %', action: 'action_boveda_percentage_custom' },
+          { id: 'bp_back', label: '⬅️ Atrás', action: 'action_boveda_back_to_deadline' }
+        ]
+      );
+    }
+  };
+
+  const finalizeBovedaSetup = (percentage: number, customDeadline?: string) => {
+    if (percentage > 50) {
+      sendBotReply(
+        `Ojo 🟡 Guardar el ${percentage}% de tus ingresos es demasiado alto y te dejaría sin saldo para vivir esta semana. Seamos realistas: lo ideal es entre 5% y 25%. ¿Qué porcentaje prefieres?`,
+        [
+          { id: 'bp_10_fix', label: '10%', action: 'action_boveda_percentage_chosen', payload: 10 },
+          { id: 'bp_15_fix', label: '15%', action: 'action_boveda_percentage_chosen', payload: 15 },
+          { id: 'bp_20_fix', label: '20%', action: 'action_boveda_percentage_chosen', payload: 20 },
+          { id: 'bp_back_fix', label: '⬅️ Atrás', action: 'action_boveda_back_to_deadline' }
+        ],
+        { isAmberAlert: true }
+      );
+      return;
+    }
+
     const validPct = Math.min(50, Math.max(1, percentage));
     const target = pendingBovedaSetup?.targetAmount || 100;
     const reason = pendingBovedaSetup?.reason || 'Ahorro';
-    const deadline = pendingBovedaSetup?.deadline || '3 meses';
+    const deadline = customDeadline || pendingBovedaSetup?.deadline || '3 meses';
 
     setBovedaConfig({
       configured: true,
@@ -678,14 +767,34 @@ export default function App() {
     if (check80) {
       setHasTriggered80Today(true);
       setTimeout(() => {
-        sendBotReply(
-          `⚠️ Llevas gastado el 80% de tu saldo de hoy ($${formatMoney(totalDespuesDeGasto)} de $${formatMoney(disponibleHoyInicial)}). Reto: evita otro gasto y guarda $2 en tu Bóveda 🔒 ¿Te sumas?`,
-          [
-            { id: 'n_yes', label: 'Me sumo ($2 a bóveda)', action: 'action_nudge_accept_2usd' },
-            { id: 'n_no', label: 'Ahora no', action: 'action_nudge_decline' }
-          ],
-          { isAmberAlert: true }
-        );
+        // Si el usuario quedó en negativo, NUNCA se propone guardar $2 (aumentaría la deuda)
+        if (newSaldo < 0) {
+          sendBotReply(
+            `Ojo 🟡 Con este gasto superaste tu saldo de hoy (${formatBalance(newSaldo)}). ¡Pasa! 💛 Hoy el mejor ahorro no es guardar en la bóveda, sino frenar aquí para no acumular deuda mañana.`,
+            MAIN_MENU_BUTTONS,
+            { isAmberAlert: true }
+          );
+        } else if (newSaldo >= 2) {
+          // Solo si tiene al menos $2 reales se ofrece el reto de mandarlos a la bóveda
+          sendBotReply(
+            `⚠️ Llevas gastado el 80% de tu saldo de hoy ($${formatMoney(totalDespuesDeGasto)} de $${formatMoney(disponibleHoyInicial)}). Te quedan $${formatMoney(newSaldo)}. Reto: evita otro gasto hoy y guarda $2 en tu Bóveda 🔒 ¿Te sumas?`,
+            [
+              { id: 'n_yes', label: 'Me sumo ($2 a bóveda)', action: 'action_nudge_accept_2usd' },
+              { id: 'n_no', label: 'Ahora no', action: 'action_nudge_decline' }
+            ],
+            { isAmberAlert: true }
+          );
+        } else {
+          // Si le queda entre $0 y $1.99, no alcanza para guardar $2 sin ir a negativo
+          sendBotReply(
+            `⚠️ Ya gastaste casi todo tu saldo de hoy ($${formatMoney(totalDespuesDeGasto)} de $${formatMoney(disponibleHoyInicial)}). Te quedan $${formatMoney(newSaldo)}. ¡El reto es llegar a la noche sin gastarlo! 💪`,
+            [
+              { id: 'n_hold_yes', label: '¡Acepto el reto!', action: 'action_nudge_accept_hold' },
+              { id: 'n_hold_no', label: 'Ahora no', action: 'action_nudge_decline' }
+            ],
+            { isAmberAlert: true }
+          );
+        }
       }, 1200);
     }
   };
@@ -1133,7 +1242,17 @@ export default function App() {
 
       case 'action_boveda_deadline_chosen':
         if (reply.payload) {
-          handleBovedaProposal(reply.payload.deadline, reply.payload.months);
+          handleBovedaProposal(reply.payload.deadline, reply.payload.weeks);
+        }
+        break;
+
+      case 'action_boveda_ask_longer_deadline':
+        handleBovedaAskLongerDeadline();
+        break;
+
+      case 'action_boveda_accept_realistic_suggestion':
+        if (reply.payload) {
+          finalizeBovedaSetup(reply.payload.pct, reply.payload.deadline);
         }
         break;
 
@@ -1229,7 +1348,14 @@ export default function App() {
         break;
 
       case 'action_nudge_accept_2usd':
-        // El reto de $2 sale del saldo del usuario y entra a la bóveda
+        if (saldoDeHoy < 2) {
+          sendBotReply(
+            `Hoy tu saldo está en ${formatBalance(saldoDeHoy)}. No te preocupes por guardar en la bóveda hoy: el mejor reto ahora es frenar y cuidar los siguientes días 👍`,
+            MAIN_MENU_BUTTONS
+          );
+          break;
+        }
+        // El reto de $2 sale del saldo del usuario y entra a la bóveda solo si tiene saldo positivo
         const transferNudge: Expense = {
           id: 'nudge_save_' + Date.now(),
           amount: 2,
@@ -1242,6 +1368,13 @@ export default function App() {
         setBovedaTotal((prev) => Math.round((prev + 2) * 100) / 100);
         sendBotReply(
           `¡Gran trabajo! 🔒 Guardé $2 en tu Bóveda Anti-Impulso. Llevas $${formatMoney(bovedaTotal + 2)} acumulados.`,
+          MAIN_MENU_BUTTONS
+        );
+        break;
+
+      case 'action_nudge_accept_hold':
+        sendBotReply(
+          '¡Esa es la actitud! 💪 Cuida ese saldo restante hasta la noche.',
           MAIN_MENU_BUTTONS
         );
         break;
@@ -1360,7 +1493,7 @@ export default function App() {
     }
 
     if (flowState === 'BOVEDA_ASK_DEADLINE') {
-      handleBovedaProposal(text, 3);
+      handleBovedaProposal(text);
       return;
     }
 
@@ -1465,6 +1598,32 @@ export default function App() {
       }
     ]);
     sendBotReply('⚡ [Escenario 1 cargado]: Ingreso de $120 para toda la semana. Tu saldo de hoy es $17.14.', MAIN_MENU_BUTTONS);
+  };
+
+  const loadScenarioImpossibleBoveda = () => {
+    setIsTestPanelOpen(false);
+    setIsMenuOpen(false);
+    setDiaActual(1);
+    setIncomesList([
+      {
+        id: 'inc_test_120',
+        amount: 120,
+        timeframe: 'week',
+        source: 'Trabajo',
+        fixedPayments: 0,
+        bovedaAmount: 0,
+        dayAdded: 1,
+        time: '09:00'
+      }
+    ]);
+    setPendingBovedaSetup({
+      reason: 'Un viaje',
+      targetAmount: 200
+    });
+    sendBotReply('⚡ [Probando meta poco realista]: Meta de $200 en 1 semana con ingreso de $120...', undefined, { delayMs: 400 });
+    setTimeout(() => {
+      handleBovedaProposal('1 semana', 1);
+    }, 900);
   };
 
   const loadScenario2Data = () => {
@@ -1737,6 +1896,14 @@ export default function App() {
                     className="w-full min-h-[44px] px-3 py-2 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/30 text-emerald-200 text-left font-semibold flex items-center justify-between cursor-pointer"
                   >
                     <span>💵 Escenario 1: $120 semanal ($17.14 hoy)</span>
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+
+                  <button
+                    onClick={loadScenarioImpossibleBoveda}
+                    className="w-full min-h-[44px] px-3 py-2 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/30 text-amber-200 text-left font-semibold flex items-center justify-between cursor-pointer"
+                  >
+                    <span>🚨 Probar meta irreal ($200 en 1 sem con $120)</span>
                     <ChevronRight className="w-4 h-4" />
                   </button>
 
